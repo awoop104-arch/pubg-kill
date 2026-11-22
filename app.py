@@ -1996,7 +1996,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       teamSummaries.forEach(t => {
         const cCell = document.createElement("div");
         cCell.className = `match-board-chicken-cell ${toneClass}`;
-        cCell.textContent = `🍗 : [ ${formatNumberDisplay(t.totalKills)} ]`;
+        cCell.textContent = `🍗 : [ ${formatNumberDisplay(t.chickens)} ]`;
         chickenRow.appendChild(cCell);
       });
       boardCard.appendChild(chickenRow);
