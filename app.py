@@ -1,12 +1,15 @@
+import asyncio
 import json
 import os
 import threading
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+import time
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
 FILE_LOCK = threading.Lock()
+STATE_VERSION = 1
 
 MODES = [
     ("solo", "솔로", 1),
@@ -76,6 +79,7 @@ def load_db():
 
 
 def save_db(data):
+    global STATE_VERSION
     parent_dir = os.path.dirname(os.path.abspath(DATA_FILE))
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
@@ -83,21 +87,25 @@ def save_db(data):
     with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp_file, DATA_FILE)
+    STATE_VERSION += 1
 
 
 class ModeStatePayload(BaseModel):
     team_count: int
     teams: list
+    client_id: str = ""
 
 
-app = FastAPI(title="PUBG 킬내기 관리 웹")
+app = FastAPI(title="PUBG 킬내기 관리 웹 (실시간)")
 
 
 @app.get("/api/state")
 def get_state():
     with FILE_LOCK:
         data = load_db()
+        version = STATE_VERSION
     return {
+        "version": version,
         "modes_meta": [
             {"key": k, "label": label, "max_members": max_m}
             for k, label, max_m in MODES
@@ -123,7 +131,8 @@ def update_mode(mode_key: str, payload: ModeStatePayload):
             "teams": payload.teams,
         }
         save_db(data)
-    return {"ok": True, "mode": mode_key, "data": data}
+        version = STATE_VERSION
+    return {"ok": True, "version": version, "mode": mode_key, "data": data}
 
 
 @app.post("/api/modes/{mode_key}/reset")
@@ -136,7 +145,45 @@ def reset_mode(mode_key: str):
         data = load_db()
         data["modes"][mode_key] = default_mode_data()
         save_db(data)
-    return {"ok": True, "mode": mode_key, "data": data}
+        version = STATE_VERSION
+    return {"ok": True, "version": version, "mode": mode_key, "data": data}
+
+
+@app.get("/api/stream")
+async def stream_state(request: Request):
+    async def event_generator():
+        last_sent_version = -1
+        last_ping = time.monotonic()
+        while True:
+            if await request.is_disconnected():
+                break
+
+            with FILE_LOCK:
+                current_version = STATE_VERSION
+                current_data = load_db() if current_version != last_sent_version else None
+
+            if current_data is not None:
+                last_sent_version = current_version
+                payload = json.dumps(
+                    {"version": current_version, "data": current_data},
+                    ensure_ascii=False,
+                )
+                yield f"data: {payload}\n\n"
+                last_ping = time.monotonic()
+            elif time.monotonic() - last_ping >= 15:
+                yield ": keepalive\n\n"
+                last_ping = time.monotonic()
+
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -225,7 +272,7 @@ HTML_PAGE = """<!DOCTYPE html>
     .settings-actions {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
     }
     input[type="text"], input[type="number"], select {
       padding: 6px 8px;
@@ -250,14 +297,6 @@ HTML_PAGE = """<!DOCTYPE html>
     }
     button:hover {
       background: #eef2f6;
-    }
-    button.primary {
-      background: #2563eb;
-      border-color: #2563eb;
-      color: #fff;
-    }
-    button.primary:hover {
-      background: #1d4ed8;
     }
     button.danger {
       background: #fff;
@@ -321,9 +360,23 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #475569;
       margin-left: 4px;
     }
-    .status-toast {
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       font-size: 12px;
-      color: #64748b;
+      font-weight: 600;
+      color: #0f766e;
+      background: #f0fdfa;
+      border: 1px solid #99f6e4;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #14b8a6;
     }
   </style>
 </head>
@@ -345,9 +398,10 @@ HTML_PAGE = """<!DOCTYPE html>
           <span class="info-text" id="slotInfo"></span>
         </div>
         <div class="settings-actions">
-          <span class="status-toast" id="saveStatus">공용 데이터 동기화됨</span>
-          <button onclick="reloadFromServer()">새로고침</button>
-          <button class="primary" onclick="saveCurrentMode(true)">저장</button>
+          <span class="live-badge" id="syncBadge">
+            <span class="live-dot"></span>
+            <span id="saveStatus">실시간 동기화 중</span>
+          </span>
           <button class="danger" onclick="resetCurrentMode()">초기화</button>
         </div>
       </div>
@@ -357,8 +411,14 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 
   <script>
+    const clientId = Math.random().toString(36).slice(2);
     let state = null;
     let currentMode = "solo";
+    let localVersion = 0;
+    let saveTimer = null;
+    let isSaving = false;
+    let pendingSave = false;
+    let eventSource = null;
 
     function getModeMeta(modeKey = currentMode) {
       return state.modes_meta.find(m => m.key === modeKey) || { key: modeKey, label: modeKey, max_members: 4 };
@@ -406,7 +466,54 @@ HTML_PAGE = """<!DOCTYPE html>
         });
       });
 
-      return { team_count: teamCount, teams };
+      return { team_count: teamCount, teams, client_id: clientId };
+    }
+
+    function scheduleAutoSave(delay = 250) {
+      document.getElementById("saveStatus").textContent = "자동 저장 중...";
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        saveTimer = null;
+        flushAutoSave();
+      }, delay);
+    }
+
+    async function flushAutoSave() {
+      if (isSaving) {
+        pendingSave = true;
+        return;
+      }
+      isSaving = true;
+      const modeToSave = currentMode;
+      const payload = collectCurrentUI();
+      state.data.modes[modeToSave] = {
+        team_count: payload.team_count,
+        teams: payload.teams
+      };
+
+      try {
+        const res = await fetch(`/api/modes/${modeToSave}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
+          return;
+        }
+        const result = await res.json();
+        localVersion = Math.max(localVersion, result.version || 0);
+        state.data = result.data;
+        document.getElementById("saveStatus").textContent = "실시간 저장 완료";
+      } catch (err) {
+        document.getElementById("saveStatus").textContent = "연결 불안정";
+      } finally {
+        isSaving = false;
+        if (pendingSave) {
+          pendingSave = false;
+          flushAutoSave();
+        }
+      }
     }
 
     function renderTabs() {
@@ -421,7 +528,31 @@ HTML_PAGE = """<!DOCTYPE html>
       });
     }
 
-    function renderTeams() {
+    function getFocusSnapshot() {
+      const active = document.activeElement;
+      if (!active || !active.dataset || !active.dataset.fieldKey) return null;
+      return {
+        fieldKey: active.dataset.fieldKey,
+        value: active.value,
+        selectionStart: active.selectionStart,
+        selectionEnd: active.selectionEnd
+      };
+    }
+
+    function restoreFocusSnapshot(snap) {
+      if (!snap) return;
+      const target = document.querySelector(`[data-field-key="${snap.fieldKey}"]`);
+      if (!target) return;
+      target.focus();
+      if (typeof snap.selectionStart === "number" && typeof target.setSelectionRange === "function") {
+        try {
+          target.setSelectionRange(snap.selectionStart, snap.selectionEnd);
+        } catch (e) {}
+      }
+    }
+
+    function renderTeams(preserveFocus = false) {
+      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
       const meta = getModeMeta(currentMode);
       const modeData = getModeData(currentMode);
       const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
@@ -438,7 +569,10 @@ HTML_PAGE = """<!DOCTYPE html>
 
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const saved = savedTeams[tIdx] || {};
-        const teamName = saved.name || `TEAM ${tIdx + 1}`;
+        const teamNameKey = `${currentMode}-t${tIdx}-name`;
+        const teamName = (focusSnap && focusSnap.fieldKey === teamNameKey)
+          ? focusSnap.value
+          : (saved.name || `TEAM ${tIdx + 1}`);
         const summary = saved.summary || "";
         const savedMembers = saved.members || [];
 
@@ -453,8 +587,9 @@ HTML_PAGE = """<!DOCTYPE html>
         left.innerHTML = `
           <span class="team-badge">TEAM ${tIdx + 1}</span>
           <label><span class="field-label">팀 이름</span></label>
-          <input type="text" class="team-name-input" value="${escapeHtml(teamName)}" style="width:160px;" />
+          <input type="text" class="team-name-input" data-field-key="${teamNameKey}" value="${escapeHtml(teamName)}" style="width:160px;" />
         `;
+        left.querySelector(".team-name-input").addEventListener("input", () => scheduleAutoSave());
 
         const right = document.createElement("div");
         right.className = "team-right";
@@ -465,7 +600,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
         const doneBtn = document.createElement("button");
         doneBtn.textContent = "완료";
-        doneBtn.onclick = () => completeTeam(card, tIdx);
+        doneBtn.onclick = () => completeTeam(card);
 
         right.appendChild(summarySpan);
         right.appendChild(doneBtn);
@@ -478,6 +613,11 @@ HTML_PAGE = """<!DOCTYPE html>
           const mSaved = savedMembers[slot - 1] || {};
           const row = document.createElement("div");
           row.className = "member-row";
+
+          const mNameKey = `${currentMode}-t${tIdx}-s${slot}-name`;
+          const mNameVal = (focusSnap && focusSnap.fieldKey === mNameKey)
+            ? focusSnap.value
+            : (mSaved.name || "");
 
           const tierOptions = [`<option value="">선택</option>`]
             .concat(state.tiers.map(t => `<option value="${t}" ${mSaved.tier === t ? "selected" : ""}>${t}</option>`))
@@ -495,7 +635,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
           row.innerHTML = `
             <span class="slot-label">${slot}번</span>
-            <input type="text" class="member-name" placeholder="멤버 이름" value="${escapeHtml(mSaved.name || "")}" />
+            <input type="text" class="member-name" data-field-key="${mNameKey}" placeholder="멤버 이름" value="${escapeHtml(mNameVal)}" />
             <span class="field-label">티어</span>
             <select class="member-tier">${tierOptions}</select>
             <span class="field-label">감점</span>
@@ -503,10 +643,20 @@ HTML_PAGE = """<!DOCTYPE html>
             <span class="field-label">킬핸디</span>
             <select class="member-handicap">${handicapOptions}</select>
           `;
+
+          row.querySelector(".member-name").addEventListener("input", () => scheduleAutoSave());
+          row.querySelector(".member-tier").addEventListener("change", () => scheduleAutoSave(50));
+          row.querySelector(".member-penalty").addEventListener("change", () => scheduleAutoSave(50));
+          row.querySelector(".member-handicap").addEventListener("change", () => scheduleAutoSave(50));
+
           card.appendChild(row);
         }
 
         listEl.appendChild(card);
+      }
+
+      if (preserveFocus) {
+        restoreFocusSnapshot(focusSnap);
       }
     }
 
@@ -518,7 +668,7 @@ HTML_PAGE = """<!DOCTYPE html>
         .replace(/>/g, "&gt;");
     }
 
-    async function completeTeam(card, tIdx) {
+    async function completeTeam(card) {
       let penaltySum = 0;
       let handicapSum = 0;
       card.querySelectorAll(".member-row").forEach(row => {
@@ -527,70 +677,88 @@ HTML_PAGE = """<!DOCTYPE html>
       });
       card.querySelector(".summary-text").textContent =
         `완료 · 감점 합계: ${penaltySum} | 킬핸디 합계: ${handicapSum}`;
-      await saveCurrentMode(false);
-    }
-
-    async function saveCurrentMode(showAlert = false) {
-      const payload = collectCurrentUI();
-      state.data.modes[currentMode] = payload;
-      document.getElementById("saveStatus").textContent = "저장 중...";
-
-      const res = await fetch(`/api/modes/${currentMode}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) {
-        document.getElementById("saveStatus").textContent = "저장 실패";
-        alert("저장 중 오류가 발생했습니다.");
-        return;
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
       }
-      const result = await res.json();
-      state.data = result.data;
-      document.getElementById("saveStatus").textContent = "공용 저장소에 반영됨";
-      if (showAlert) {
-        alert("저장되었습니다.");
-      }
+      await flushAutoSave();
     }
 
     async function switchMode(nextMode) {
       if (nextMode === currentMode) return;
-      await saveCurrentMode(false);
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        await flushAutoSave();
+      }
       currentMode = nextMode;
       renderTabs();
-      renderTeams();
+      renderTeams(false);
     }
 
     async function resetCurrentMode() {
       const meta = getModeMeta(currentMode);
       if (!confirm(`[${meta.label}] 모드 데이터를 초기화할까요?`)) return;
 
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
       const res = await fetch(`/api/modes/${currentMode}/reset`, { method: "POST" });
       if (!res.ok) {
         alert("초기화 중 오류가 발생했습니다.");
         return;
       }
       const result = await res.json();
+      localVersion = Math.max(localVersion, result.version || 0);
       state.data = result.data;
-      renderTeams();
+      renderTeams(false);
       document.getElementById("saveStatus").textContent = `${meta.label} 초기화 완료`;
     }
 
-    async function reloadFromServer() {
+    function connectRealtimeStream() {
+      if (eventSource) {
+        eventSource.close();
+      }
+      eventSource = new EventSource("/api/stream");
+      eventSource.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (!msg || typeof msg.version !== "number") return;
+          if (msg.version <= localVersion) return;
+          if (saveTimer || isSaving) return;
+
+          localVersion = msg.version;
+          state.data = msg.data;
+          renderTeams(true);
+          document.getElementById("saveStatus").textContent = "실시간 동기화됨";
+        } catch (e) {}
+      };
+      eventSource.onerror = () => {
+        document.getElementById("saveStatus").textContent = "재연결 중...";
+      };
+    }
+
+    async function initApp() {
       const res = await fetch("/api/state");
       state = await res.json();
+      localVersion = state.version || 1;
       renderTabs();
-      renderTeams();
-      document.getElementById("saveStatus").textContent = "최신 데이터 불러옴";
+      renderTeams(false);
+      connectRealtimeStream();
     }
 
     document.getElementById("teamCountInput").addEventListener("change", () => {
       const current = collectCurrentUI();
-      state.data.modes[currentMode] = current;
-      renderTeams();
+      state.data.modes[currentMode] = {
+        team_count: current.team_count,
+        teams: current.teams
+      };
+      renderTeams(false);
+      scheduleAutoSave(50);
     });
 
-    reloadFromServer();
+    initApp();
   </script>
 </body>
 </html>
