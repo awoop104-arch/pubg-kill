@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
-EDIT_PIN = os.environ.get("EDIT_PIN", "1234")
+EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
