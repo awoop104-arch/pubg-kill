@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import threading
@@ -8,6 +10,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
+EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
+TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
+
 FILE_LOCK = threading.Lock()
 STATE_VERSION = 1
 
@@ -149,6 +154,24 @@ PENALTIES = [0] + [-n for n in range(1, 11)]
 HANDICAPS = list(range(0, 11))
 
 
+def issue_edit_token() -> str:
+    msg = f"editor:{EDIT_PIN}".encode("utf-8")
+    return hmac.new(TOKEN_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def verify_edit_token(token: str | None) -> bool:
+    if not token:
+        return False
+    expected = issue_edit_token()
+    return hmac.compare_digest(token.strip(), expected)
+
+
+def require_editor(request: Request):
+    token = request.headers.get("X-Edit-Token", "")
+    if not verify_edit_token(token):
+        raise HTTPException(status_code=403, detail="수정 권한이 없습니다. 관리자 PIN으로 잠금을 해제해 주세요.")
+
+
 def default_tier_board():
     board = {tier: [] for tier in TIERS}
     for player_name, tier in INITIAL_PLAYER_TIER_MAP.items():
@@ -244,6 +267,10 @@ def save_db(data):
     STATE_VERSION += 1
 
 
+class AuthUnlockPayload(BaseModel):
+    pin: str
+
+
 class ModeStatePayload(BaseModel):
     team_count: int
     teams: list
@@ -255,7 +282,20 @@ class TierBoardPayload(BaseModel):
     client_id: str = ""
 
 
-app = FastAPI(title="PUBG 킬내기 관리 웹 (실시간)")
+app = FastAPI(title="PUBG 킬내기 관리 웹 (실시간 + 권한 잠금)")
+
+
+@app.post("/api/auth/unlock")
+def unlock_editor(payload: AuthUnlockPayload):
+    if not hmac.compare_digest((payload.pin or "").strip(), EDIT_PIN.strip()):
+        raise HTTPException(status_code=401, detail="비밀번호(PIN)가 올바르지 않습니다.")
+    return {"ok": True, "edit_token": issue_edit_token()}
+
+
+@app.get("/api/auth/verify")
+def verify_editor(request: Request):
+    token = request.headers.get("X-Edit-Token", "")
+    return {"ok": verify_edit_token(token)}
 
 
 @app.get("/api/state")
@@ -282,7 +322,8 @@ def get_state():
 
 
 @app.put("/api/modes/{mode_key}")
-def update_mode(mode_key: str, payload: ModeStatePayload):
+def update_mode(mode_key: str, payload: ModeStatePayload, request: Request):
+    require_editor(request)
     valid_keys = {k for k, _, _ in MODES if k != "tiers"}
     if mode_key not in valid_keys:
         raise HTTPException(status_code=400, detail="지원하지 않는 모드입니다.")
@@ -300,7 +341,8 @@ def update_mode(mode_key: str, payload: ModeStatePayload):
 
 
 @app.post("/api/modes/{mode_key}/reset")
-def reset_mode(mode_key: str):
+def reset_mode(mode_key: str, request: Request):
+    require_editor(request)
     valid_keys = {k for k, _, _ in MODES if k != "tiers"}
     if mode_key not in valid_keys:
         raise HTTPException(status_code=400, detail="지원하지 않는 모드입니다.")
@@ -314,7 +356,8 @@ def reset_mode(mode_key: str):
 
 
 @app.put("/api/tier-board")
-def update_tier_board(payload: TierBoardPayload):
+def update_tier_board(payload: TierBoardPayload, request: Request):
+    require_editor(request)
     with FILE_LOCK:
         data = load_db()
         data["tier_board"] = normalize_tier_board(payload.tier_board)
@@ -324,7 +367,8 @@ def update_tier_board(payload: TierBoardPayload):
 
 
 @app.post("/api/tier-board/reset")
-def reset_tier_board():
+def reset_tier_board(request: Request):
+    require_editor(request)
     with FILE_LOCK:
         data = load_db()
         data["tier_board"] = default_tier_board()
@@ -441,6 +485,38 @@ HTML_PAGE = """<!DOCTYPE html>
       margin-bottom: 14px;
       box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
     }
+    .auth-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .auth-left {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .lock-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    .lock-badge.locked {
+      color: #991b1b;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+    }
+    .lock-badge.unlocked {
+      color: #1d4ed8;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+    }
     .settings-row {
       display: flex;
       flex-wrap: wrap;
@@ -459,7 +535,7 @@ HTML_PAGE = """<!DOCTYPE html>
       align-items: center;
       gap: 10px;
     }
-    input[type="text"], input[type="number"], select {
+    input[type="text"], input[type="password"], input[type="number"], select {
       padding: 6px 8px;
       border: 1px solid #cbd5e1;
       border-radius: 7px;
@@ -467,8 +543,15 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #fff;
       color: #0f172a;
     }
+    input[type="password"] {
+      width: 130px;
+    }
     input[type="number"] {
       width: 68px;
+    }
+    input:disabled, select:disabled, button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
     button {
       padding: 7px 13px;
@@ -480,15 +563,23 @@ HTML_PAGE = """<!DOCTYPE html>
       font-weight: 600;
       cursor: pointer;
     }
-    button:hover {
+    button:hover:not(:disabled) {
       background: #eef2f6;
+    }
+    button.primary {
+      background: #1e293b;
+      color: #fff;
+      border-color: #1e293b;
+    }
+    button.primary:hover:not(:disabled) {
+      background: #0f172a;
     }
     button.danger {
       background: #fff;
       border-color: #fca5a5;
       color: #b91c1c;
     }
-    button.danger:hover {
+    button.danger:hover:not(:disabled) {
       background: #fef2f2;
     }
     .team-header {
@@ -665,7 +756,7 @@ HTML_PAGE = """<!DOCTYPE html>
       cursor: pointer;
       flex-shrink: 0;
     }
-    .chip-del:hover {
+    .chip-del:hover:not(:disabled) {
       color: #dc2626;
       background: transparent;
     }
@@ -700,6 +791,13 @@ HTML_PAGE = """<!DOCTYPE html>
     </header>
 
     <div class="card">
+      <div class="auth-row">
+        <div class="auth-left" id="authControls"></div>
+        <span class="info-text" id="authHint">허용된 인원만 PIN 입력 후 수정 가능 · 다른 사용자는 실시간 조회 전용</span>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="settings-row">
         <div class="settings-left" id="modeSettingsLeft"></div>
         <div class="settings-actions">
@@ -717,6 +815,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
   <script>
     const clientId = Math.random().toString(36).slice(2);
+    const TOKEN_STORAGE_KEY = "pubg_kill_match_edit_token";
+
     let state = null;
     let currentMode = "solo";
     let localVersion = 0;
@@ -724,6 +824,99 @@ HTML_PAGE = """<!DOCTYPE html>
     let isSaving = false;
     let pendingSave = false;
     let eventSource = null;
+    let canEdit = false;
+    let editToken = localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+
+    function authHeaders(extra = {}) {
+      const headers = { ...extra };
+      if (editToken) {
+        headers["X-Edit-Token"] = editToken;
+      }
+      return headers;
+    }
+
+    function renderAuthBar() {
+      const container = document.getElementById("authControls");
+      if (canEdit) {
+        container.innerHTML = `
+          <span class="lock-badge unlocked">수정 권한 활성 (편집 가능)</span>
+          <button type="button" onclick="lockEditor()">수정 잠금</button>
+        `;
+      } else {
+        container.innerHTML = `
+          <span class="lock-badge locked">보기 전용 (수정 잠금)</span>
+          <input type="password" id="pinInput" placeholder="관리자 PIN" />
+          <button type="button" class="primary" onclick="unlockEditor()">잠금 해제</button>
+        `;
+        const pinEl = document.getElementById("pinInput");
+        if (pinEl) {
+          pinEl.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              unlockEditor();
+            }
+          });
+        }
+      }
+    }
+
+    async function unlockEditor() {
+      const pinEl = document.getElementById("pinInput");
+      const pin = pinEl ? pinEl.value : "";
+      if (!pin.trim()) {
+        alert("비밀번호(PIN)를 입력해 주세요.");
+        return;
+      }
+      try {
+        const res = await fetch("/api/auth/unlock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin })
+        });
+        if (!res.ok) {
+          alert("비밀번호(PIN)가 올바르지 않습니다.");
+          return;
+        }
+        const data = await res.json();
+        editToken = data.edit_token || "";
+        localStorage.setItem(TOKEN_STORAGE_KEY, editToken);
+        canEdit = true;
+        renderAuthBar();
+        renderSettingsBar();
+        renderMainContent(false);
+      } catch (e) {
+        alert("잠금 해제 요청 중 오류가 발생했습니다.");
+      }
+    }
+
+    function lockEditor() {
+      editToken = "";
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      canEdit = false;
+      renderAuthBar();
+      renderSettingsBar();
+      renderMainContent(false);
+    }
+
+    async function verifySavedToken() {
+      if (!editToken) {
+        canEdit = false;
+        renderAuthBar();
+        return;
+      }
+      try {
+        const res = await fetch("/api/auth/verify", { headers: authHeaders() });
+        const data = await res.json();
+        canEdit = Boolean(data && data.ok);
+        if (!canEdit) {
+          localStorage.removeItem(TOKEN_STORAGE_KEY);
+          editToken = "";
+        }
+      } catch (e) {
+        canEdit = false;
+      }
+      renderAuthBar();
+    }
 
     function getModeMeta(modeKey = currentMode) {
       return state.modes_meta.find(m => m.key === modeKey) || { key: modeKey, label: modeKey, max_members: 4 };
@@ -818,6 +1011,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function scheduleAutoSave(delay = 250) {
+      if (!canEdit) return;
       document.getElementById("saveStatus").textContent = "자동 저장 중...";
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
@@ -827,6 +1021,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     async function flushAutoSave() {
+      if (!canEdit) return;
       if (isSaving) {
         pendingSave = true;
         return;
@@ -841,9 +1036,13 @@ HTML_PAGE = """<!DOCTYPE html>
           };
           const res = await fetch("/api/tier-board", {
             method: "PUT",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload)
           });
+          if (res.status === 403) {
+            lockEditor();
+            return;
+          }
           if (!res.ok) {
             document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
             return;
@@ -861,9 +1060,13 @@ HTML_PAGE = """<!DOCTYPE html>
           };
           const res = await fetch(`/api/modes/${modeToSave}`, {
             method: "PUT",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload)
           });
+          if (res.status === 403) {
+            lockEditor();
+            return;
+          }
           if (!res.ok) {
             document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
             return;
@@ -910,7 +1113,7 @@ HTML_PAGE = """<!DOCTYPE html>
     function restoreFocusSnapshot(snap) {
       if (!snap) return;
       const target = document.querySelector(`[data-field-key="${snap.fieldKey}"]`);
-      if (!target) return;
+      if (!target || target.disabled) return;
       target.focus();
       if (typeof snap.selectionStart === "number" && typeof target.setSelectionRange === "function") {
         try {
@@ -922,6 +1125,7 @@ HTML_PAGE = """<!DOCTYPE html>
     function renderSettingsBar() {
       const leftEl = document.getElementById("modeSettingsLeft");
       const resetBtn = document.getElementById("resetBtn");
+      resetBtn.disabled = !canEdit;
 
       if (currentMode === "tiers") {
         const board = getTierBoard();
@@ -942,24 +1146,28 @@ HTML_PAGE = """<!DOCTYPE html>
           `[${meta.label}] AI 밸런스 조절 제외 · 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
         leftEl.innerHTML = `
           <label for="teamCountInput"><strong>참가 팀 수</strong></label>
-          <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" />
+          <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
           <span class="info-text">${meta.label} 기준 · 팀당 최대 ${meta.max_members}명</span>
         `;
         resetBtn.textContent = "초기화";
 
-        document.getElementById("teamCountInput").addEventListener("change", () => {
-          const current = collectCurrentTeamUI();
-          state.data.modes[currentMode] = {
-            team_count: current.team_count,
-            teams: current.teams
-          };
-          renderMainContent(false);
-          scheduleAutoSave(50);
-        });
+        const countInput = document.getElementById("teamCountInput");
+        if (countInput && canEdit) {
+          countInput.addEventListener("change", () => {
+            const current = collectCurrentTeamUI();
+            state.data.modes[currentMode] = {
+              team_count: current.team_count,
+              teams: current.teams
+            };
+            renderMainContent(false);
+            scheduleAutoSave(50);
+          });
+        }
       }
     }
 
     function addPlayerToTier(tier, inputEl) {
+      if (!canEdit) return;
       const rawName = (inputEl.value || "").trim();
       if (!rawName) return;
 
@@ -976,6 +1184,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function removePlayerFromTier(tier, playerName) {
+      if (!canEdit) return;
       const board = getTierBoard();
       board[tier] = (board[tier] || []).filter(n => n !== playerName);
       renderSettingsBar();
@@ -1036,9 +1245,12 @@ HTML_PAGE = """<!DOCTYPE html>
               item.className = "vertical-member-item";
               item.innerHTML = `
                 <span class="vertical-member-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-                <button type="button" class="chip-del" title="삭제">×</button>
+                <button type="button" class="chip-del" title="삭제" ${canEdit ? "" : "disabled"}>×</button>
               `;
-              item.querySelector(".chip-del").onclick = () => removePlayerFromTier(tier, name);
+              const delBtn = item.querySelector(".chip-del");
+              if (canEdit) {
+                delBtn.onclick = () => removePlayerFromTier(tier, name);
+              }
               vList.appendChild(item);
             });
           }
@@ -1049,19 +1261,21 @@ HTML_PAGE = """<!DOCTYPE html>
           addBox.className = "subtier-add-box";
           const inputVal = (focusSnap && focusSnap.fieldKey === inputKey) ? focusSnap.value : "";
           addBox.innerHTML = `
-            <input type="text" class="subtier-add-input" data-field-key="${inputKey}" placeholder="이름" value="${escapeHtml(inputVal)}" />
-            <button type="button" class="subtier-add-btn">+</button>
+            <input type="text" class="subtier-add-input" data-field-key="${inputKey}" placeholder="이름" value="${escapeHtml(inputVal)}" ${canEdit ? "" : "disabled"} />
+            <button type="button" class="subtier-add-btn" ${canEdit ? "" : "disabled"}>+</button>
           `;
 
           const addInput = addBox.querySelector(".subtier-add-input");
           const addBtn = addBox.querySelector(".subtier-add-btn");
-          addBtn.onclick = () => addPlayerToTier(tier, addInput);
-          addInput.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              addPlayerToTier(tier, addInput);
-            }
-          });
+          if (canEdit) {
+            addBtn.onclick = () => addPlayerToTier(tier, addInput);
+            addInput.addEventListener("keydown", (e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addPlayerToTier(tier, addInput);
+              }
+            });
+          }
 
           col.appendChild(addBox);
           colsWrap.appendChild(col);
@@ -1073,7 +1287,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
       container.appendChild(wrap);
 
-      if (preserveFocus) {
+      if (preserveFocus && canEdit) {
         restoreFocusSnapshot(focusSnap);
       }
     }
@@ -1087,6 +1301,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const listEl = document.getElementById("mainContent");
       listEl.innerHTML = "";
       const savedTeams = modeData.teams || [];
+      const disAttr = canEdit ? "" : "disabled";
 
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const saved = savedTeams[tIdx] || {};
@@ -1108,9 +1323,12 @@ HTML_PAGE = """<!DOCTYPE html>
         left.innerHTML = `
           <span class="team-badge">TEAM ${tIdx + 1}</span>
           <label><span class="field-label">팀 이름</span></label>
-          <input type="text" class="team-name-input" data-field-key="${teamNameKey}" value="${escapeHtml(teamName)}" style="width:160px;" />
+          <input type="text" class="team-name-input" data-field-key="${teamNameKey}" value="${escapeHtml(teamName)}" style="width:160px;" ${disAttr} />
         `;
-        left.querySelector(".team-name-input").addEventListener("input", () => scheduleAutoSave());
+        const teamNameInput = left.querySelector(".team-name-input");
+        if (canEdit) {
+          teamNameInput.addEventListener("input", () => scheduleAutoSave());
+        }
 
         const right = document.createElement("div");
         right.className = "team-right";
@@ -1121,7 +1339,10 @@ HTML_PAGE = """<!DOCTYPE html>
 
         const doneBtn = document.createElement("button");
         doneBtn.textContent = "완료";
-        doneBtn.onclick = () => completeTeam(card);
+        doneBtn.disabled = !canEdit;
+        if (canEdit) {
+          doneBtn.onclick = () => completeTeam(card);
+        }
 
         right.appendChild(summarySpan);
         right.appendChild(doneBtn);
@@ -1159,36 +1380,38 @@ HTML_PAGE = """<!DOCTYPE html>
 
           row.innerHTML = `
             <span class="slot-label">${slot}번</span>
-            <input type="text" class="member-name" data-field-key="${mNameKey}" placeholder="멤버 이름" value="${escapeHtml(mNameVal)}" />
+            <input type="text" class="member-name" data-field-key="${mNameKey}" placeholder="멤버 이름" value="${escapeHtml(mNameVal)}" ${disAttr} />
             <span class="field-label">티어</span>
-            <select class="member-tier">${tierOptions}</select>
+            <select class="member-tier" ${disAttr}>${tierOptions}</select>
             <span class="field-label">감점</span>
-            <select class="member-penalty">${penaltyOptions}</select>
+            <select class="member-penalty" ${disAttr}>${penaltyOptions}</select>
             <span class="field-label">킬핸디</span>
-            <select class="member-handicap">${handicapOptions}</select>
+            <select class="member-handicap" ${disAttr}>${handicapOptions}</select>
           `;
 
-          const nameInput = row.querySelector(".member-name");
-          const tierSelect = row.querySelector(".member-tier");
+          if (canEdit) {
+            const nameInput = row.querySelector(".member-name");
+            const tierSelect = row.querySelector(".member-tier");
 
-          const applyAutoTier = () => {
-            const autoTier = lookupAutoTier(nameInput.value);
-            if (autoTier && state.tiers.includes(autoTier)) {
-              tierSelect.value = autoTier;
-            }
-          };
+            const applyAutoTier = () => {
+              const autoTier = lookupAutoTier(nameInput.value);
+              if (autoTier && state.tiers.includes(autoTier)) {
+                tierSelect.value = autoTier;
+              }
+            };
 
-          nameInput.addEventListener("input", () => {
-            applyAutoTier();
-            scheduleAutoSave();
-          });
-          nameInput.addEventListener("change", () => {
-            applyAutoTier();
-            scheduleAutoSave(50);
-          });
-          tierSelect.addEventListener("change", () => scheduleAutoSave(50));
-          row.querySelector(".member-penalty").addEventListener("change", () => scheduleAutoSave(50));
-          row.querySelector(".member-handicap").addEventListener("change", () => scheduleAutoSave(50));
+            nameInput.addEventListener("input", () => {
+              applyAutoTier();
+              scheduleAutoSave();
+            });
+            nameInput.addEventListener("change", () => {
+              applyAutoTier();
+              scheduleAutoSave(50);
+            });
+            tierSelect.addEventListener("change", () => scheduleAutoSave(50));
+            row.querySelector(".member-penalty").addEventListener("change", () => scheduleAutoSave(50));
+            row.querySelector(".member-handicap").addEventListener("change", () => scheduleAutoSave(50));
+          }
 
           card.appendChild(row);
         }
@@ -1196,7 +1419,7 @@ HTML_PAGE = """<!DOCTYPE html>
         listEl.appendChild(card);
       }
 
-      if (preserveFocus) {
+      if (preserveFocus && canEdit) {
         restoreFocusSnapshot(focusSnap);
       }
     }
@@ -1218,6 +1441,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     async function completeTeam(card) {
+      if (!canEdit) return;
       let penaltySum = 0;
       let handicapSum = 0;
       card.querySelectorAll(".member-row").forEach(row => {
@@ -1235,7 +1459,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
     async function switchMode(nextMode) {
       if (nextMode === currentMode) return;
-      if (saveTimer) {
+      if (canEdit && saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
         await flushAutoSave();
@@ -1247,6 +1471,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     async function resetCurrentView() {
+      if (!canEdit) return;
       if (saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
@@ -1254,7 +1479,14 @@ HTML_PAGE = """<!DOCTYPE html>
 
       if (currentMode === "tiers") {
         if (!confirm("티어표를 기본 명단으로 되돌릴까요?")) return;
-        const res = await fetch("/api/tier-board/reset", { method: "POST" });
+        const res = await fetch("/api/tier-board/reset", {
+          method: "POST",
+          headers: authHeaders()
+        });
+        if (res.status === 403) {
+          lockEditor();
+          return;
+        }
         if (!res.ok) {
           alert("초기화 중 오류가 발생했습니다.");
           return;
@@ -1271,7 +1503,14 @@ HTML_PAGE = """<!DOCTYPE html>
       const meta = getModeMeta(currentMode);
       if (!confirm(`[${meta.label}] 모드 데이터를 초기화할까요?`)) return;
 
-      const res = await fetch(`/api/modes/${currentMode}/reset`, { method: "POST" });
+      const res = await fetch(`/api/modes/${currentMode}/reset`, {
+        method: "POST",
+        headers: authHeaders()
+      });
+      if (res.status === 403) {
+        lockEditor();
+        return;
+      }
       if (!res.ok) {
         alert("초기화 중 오류가 발생했습니다.");
         return;
@@ -1312,6 +1551,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const res = await fetch("/api/state");
       state = await res.json();
       localVersion = state.version || 1;
+      await verifySavedToken();
       renderTabs();
       renderSettingsBar();
       renderMainContent(false);
