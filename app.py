@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
-EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
+EDIT_PIN = os.environ.get("EDIT_PIN", "1234")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
@@ -21,7 +21,16 @@ MODES = [
     ("duo", "듀오", 2),
     ("squad", "스쿼드", 4),
     ("tiers", "티어표", 0),
+    ("scoreboard", "점수판", 0),
 ]
+
+TEAM_MODES = [
+    ("solo", "솔로", 1),
+    ("duo", "듀오", 2),
+    ("squad", "스쿼드", 4),
+]
+
+MAX_ROUNDS = 30
 
 TIER_GROUPS = [
     ("0티어", ["0티어 최상", "0티어 상", "0티어 중", "0티어 하"]),
@@ -206,14 +215,43 @@ def default_mode_data():
     }
 
 
+def default_scoreboard_data():
+    return {
+        "active_team_mode": "solo",
+        "rounds_by_mode": {
+            mode_key: {}
+            for mode_key, _, _ in TEAM_MODES
+        },
+    }
+
+
+def normalize_scoreboard_data(raw_sb):
+    base = default_scoreboard_data()
+    if not isinstance(raw_sb, dict):
+        return base
+
+    valid_team_modes = {k for k, _, _ in TEAM_MODES}
+    active = str(raw_sb.get("active_team_mode", "solo"))
+    if active in valid_team_modes:
+        base["active_team_mode"] = active
+
+    raw_rounds = raw_sb.get("rounds_by_mode", {})
+    if isinstance(raw_rounds, dict):
+        for mode_key in valid_team_modes:
+            mode_rounds = raw_rounds.get(mode_key, {})
+            if isinstance(mode_rounds, dict):
+                base["rounds_by_mode"][mode_key] = mode_rounds
+    return base
+
+
 def default_db():
     return {
         "modes": {
             mode_key: default_mode_data()
-            for mode_key, _, _ in MODES
-            if mode_key != "tiers"
+            for mode_key, _, _ in TEAM_MODES
         },
         "tier_board": default_tier_board(),
+        "scoreboard": default_scoreboard_data(),
     }
 
 
@@ -236,9 +274,7 @@ def load_db():
         return base
 
     raw_modes = raw.get("modes", {})
-    for mode_key, _, _ in MODES:
-        if mode_key == "tiers":
-            continue
+    for mode_key, _, _ in TEAM_MODES:
         m = raw_modes.get(mode_key, {})
         if not isinstance(m, dict):
             m = {}
@@ -252,6 +288,7 @@ def load_db():
         }
 
     base["tier_board"] = normalize_tier_board(raw.get("tier_board"))
+    base["scoreboard"] = normalize_scoreboard_data(raw.get("scoreboard"))
     return base
 
 
@@ -282,7 +319,13 @@ class TierBoardPayload(BaseModel):
     client_id: str = ""
 
 
-app = FastAPI(title="PUBG 킬내기 관리 웹 (실시간 + 권한 잠금)")
+class ScoreboardPayload(BaseModel):
+    active_team_mode: str = "solo"
+    rounds_by_mode: dict = {}
+    client_id: str = ""
+
+
+app = FastAPI(title="PUBG 킬내기 관리 웹 (실시간 + 티어표 + 점수판)")
 
 
 @app.post("/api/auth/unlock")
@@ -309,6 +352,11 @@ def get_state():
             {"key": k, "label": label, "max_members": max_m}
             for k, label, max_m in MODES
         ],
+        "team_modes_meta": [
+            {"key": k, "label": label, "max_members": max_m}
+            for k, label, max_m in TEAM_MODES
+        ],
+        "max_rounds": MAX_ROUNDS,
         "tier_groups": [
             {"group": g, "tiers": sub}
             for g, sub in TIER_GROUPS
@@ -324,7 +372,7 @@ def get_state():
 @app.put("/api/modes/{mode_key}")
 def update_mode(mode_key: str, payload: ModeStatePayload, request: Request):
     require_editor(request)
-    valid_keys = {k for k, _, _ in MODES if k != "tiers"}
+    valid_keys = {k for k, _, _ in TEAM_MODES}
     if mode_key not in valid_keys:
         raise HTTPException(status_code=400, detail="지원하지 않는 모드입니다.")
 
@@ -343,7 +391,7 @@ def update_mode(mode_key: str, payload: ModeStatePayload, request: Request):
 @app.post("/api/modes/{mode_key}/reset")
 def reset_mode(mode_key: str, request: Request):
     require_editor(request)
-    valid_keys = {k for k, _, _ in MODES if k != "tiers"}
+    valid_keys = {k for k, _, _ in TEAM_MODES}
     if mode_key not in valid_keys:
         raise HTTPException(status_code=400, detail="지원하지 않는 모드입니다.")
 
@@ -372,6 +420,34 @@ def reset_tier_board(request: Request):
     with FILE_LOCK:
         data = load_db()
         data["tier_board"] = default_tier_board()
+        save_db(data)
+        version = STATE_VERSION
+    return {"ok": True, "version": version, "data": data}
+
+
+@app.put("/api/scoreboard")
+def update_scoreboard(payload: ScoreboardPayload, request: Request):
+    require_editor(request)
+    with FILE_LOCK:
+        data = load_db()
+        data["scoreboard"] = normalize_scoreboard_data({
+            "active_team_mode": payload.active_team_mode,
+            "rounds_by_mode": payload.rounds_by_mode,
+        })
+        save_db(data)
+        version = STATE_VERSION
+    return {"ok": True, "version": version, "data": data}
+
+
+@app.post("/api/scoreboard/reset")
+def reset_scoreboard(request: Request):
+    require_editor(request)
+    with FILE_LOCK:
+        data = load_db()
+        sb = normalize_scoreboard_data(data.get("scoreboard"))
+        active = sb.get("active_team_mode", "solo")
+        sb["rounds_by_mode"][active] = {}
+        data["scoreboard"] = sb
         save_db(data)
         version = STATE_VERSION
     return {"ok": True, "version": version, "data": data}
@@ -429,9 +505,9 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #1e242b;
     }
     .wrap {
-      max-width: 1320px;
+      max-width: 1380px;
       margin: 0 auto;
-      padding: 18px 16px 40px;
+      padding: 18px 16px 48px;
     }
     header {
       display: flex;
@@ -472,6 +548,25 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #1e293b;
       color: #fff;
       border-color: #1e293b;
+    }
+    .submode-pills {
+      display: inline-flex;
+      gap: 5px;
+    }
+    .pill-btn {
+      padding: 5px 11px;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: #334155;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .pill-btn.active {
+      background: #0f766e;
+      color: #fff;
+      border-color: #0f766e;
     }
     .info-text {
       font-size: 13px;
@@ -778,6 +873,134 @@ HTML_PAGE = """<!DOCTYPE html>
       font-size: 12px;
       white-space: nowrap;
     }
+
+    /* 점수판(최대 30라운드) 스타일 */
+    .sb-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .sb-mini-card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .sb-mini-name {
+      font-size: 14px;
+      font-weight: 800;
+      color: #0f172a;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sb-mini-score {
+      font-size: 15px;
+      font-weight: 800;
+      color: #0f766e;
+      white-space: nowrap;
+    }
+    .sb-team-card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      margin-bottom: 14px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .sb-team-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 14px;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .sb-team-title {
+      font-size: 15px;
+      font-weight: 800;
+      color: #0f172a;
+    }
+    .sb-team-totals {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #0f766e;
+    }
+    .sb-table-wrap {
+      overflow-x: auto;
+      max-height: 540px;
+    }
+    table.sb-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    table.sb-table th, table.sb-table td {
+      border: 1px solid #e2e8f0;
+      padding: 5px 6px;
+      text-align: center;
+      white-space: nowrap;
+    }
+    table.sb-table thead th {
+      position: sticky;
+      top: 0;
+      background: #1e293b;
+      color: #fff;
+      z-index: 2;
+      font-weight: 700;
+    }
+    table.sb-table th.round-col, table.sb-table td.round-col {
+      position: sticky;
+      left: 0;
+      background: #f8fafc;
+      font-weight: 800;
+      color: #334155;
+      z-index: 1;
+      width: 54px;
+    }
+    table.sb-table thead th.round-col {
+      background: #0f172a;
+      color: #fff;
+      z-index: 3;
+    }
+    .kill-input {
+      width: 62px;
+      padding: 4px 6px;
+      font-size: 12px;
+      text-align: right;
+    }
+    .death-cell-wrap {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+    .death-chk {
+      width: 15px;
+      height: 15px;
+      cursor: pointer;
+    }
+    .pen-tag {
+      font-size: 11px;
+      color: #b91c1c;
+      font-weight: 700;
+    }
+    .round-sum-cell {
+      font-weight: 800;
+      color: #0f172a;
+      background: #f8fafc;
+      min-width: 66px;
+    }
   </style>
 </head>
 <body>
@@ -922,11 +1145,33 @@ HTML_PAGE = """<!DOCTYPE html>
       return state.modes_meta.find(m => m.key === modeKey) || { key: modeKey, label: modeKey, max_members: 4 };
     }
 
+    function getTeamModeMeta(modeKey) {
+      return (state.team_modes_meta || []).find(m => m.key === modeKey) || { key: modeKey, label: modeKey, max_members: 4 };
+    }
+
     function getModeData(modeKey = currentMode) {
       if (!state.data.modes[modeKey]) {
         state.data.modes[modeKey] = { team_count: 2, teams: [] };
       }
       return state.data.modes[modeKey];
+    }
+
+    function getScoreboardData() {
+      if (!state.data.scoreboard || typeof state.data.scoreboard !== "object") {
+        state.data.scoreboard = { active_team_mode: "solo", rounds_by_mode: { solo: {}, duo: {}, squad: {} } };
+      }
+      if (!state.data.scoreboard.rounds_by_mode || typeof state.data.scoreboard.rounds_by_mode !== "object") {
+        state.data.scoreboard.rounds_by_mode = { solo: {}, duo: {}, squad: {} };
+      }
+      ["solo", "duo", "squad"].forEach(k => {
+        if (!state.data.scoreboard.rounds_by_mode[k] || typeof state.data.scoreboard.rounds_by_mode[k] !== "object") {
+          state.data.scoreboard.rounds_by_mode[k] = {};
+        }
+      });
+      if (!["solo", "duo", "squad"].includes(state.data.scoreboard.active_team_mode)) {
+        state.data.scoreboard.active_team_mode = "solo";
+      }
+      return state.data.scoreboard;
     }
 
     function getTierBoard() {
@@ -1051,6 +1296,30 @@ HTML_PAGE = """<!DOCTYPE html>
           localVersion = Math.max(localVersion, result.version || 0);
           state.data = result.data;
           document.getElementById("saveStatus").textContent = "실시간 저장 완료";
+        } else if (currentMode === "scoreboard") {
+          const sb = getScoreboardData();
+          const payload = {
+            active_team_mode: sb.active_team_mode,
+            rounds_by_mode: sb.rounds_by_mode,
+            client_id: clientId
+          };
+          const res = await fetch("/api/scoreboard", {
+            method: "PUT",
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify(payload)
+          });
+          if (res.status === 403) {
+            lockEditor();
+            return;
+          }
+          if (!res.ok) {
+            document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
+            return;
+          }
+          const result = await res.json();
+          localVersion = Math.max(localVersion, result.version || 0);
+          state.data = result.data;
+          document.getElementById("saveStatus").textContent = "실시간 저장 완료";
         } else {
           const modeToSave = currentMode;
           const payload = collectCurrentTeamUI();
@@ -1137,6 +1406,31 @@ HTML_PAGE = """<!DOCTYPE html>
           <span class="info-text">${totalCount}명</span>
         `;
         resetBtn.textContent = "기본 티어표 복원";
+      } else if (currentMode === "scoreboard") {
+        const sb = getScoreboardData();
+        const activeMode = sb.active_team_mode;
+        const tMeta = getTeamModeMeta(activeMode);
+        const mData = getModeData(activeMode);
+        const tCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+
+        document.getElementById("modeInfo").textContent =
+          `[점수판 · ${tMeta.label}] 최대 ${state.max_rounds || 30}라운드 · 킬점수 직접 입력 · 데스 체크 시 감점 차감`;
+        leftEl.innerHTML = `
+          <strong>모드</strong>
+          <div class="submode-pills" id="sbModePills"></div>
+          <span class="info-text">${tCount}팀 (팀당 최대 ${tMeta.max_members}명) · 최대 30라운드</span>
+        `;
+        resetBtn.textContent = "점수판 초기화";
+
+        const pillsWrap = document.getElementById("sbModePills");
+        (state.team_modes_meta || []).forEach(tm => {
+          const pBtn = document.createElement("button");
+          pBtn.type = "button";
+          pBtn.className = "pill-btn" + (tm.key === activeMode ? " active" : "");
+          pBtn.textContent = tm.label;
+          pBtn.onclick = () => switchScoreboardTeamMode(tm.key);
+          pillsWrap.appendChild(pBtn);
+        });
       } else {
         const meta = getModeMeta(currentMode);
         const modeData = getModeData(currentMode);
@@ -1164,6 +1458,278 @@ HTML_PAGE = """<!DOCTYPE html>
           });
         }
       }
+    }
+
+    async function switchScoreboardTeamMode(nextTeamMode) {
+      const sb = getScoreboardData();
+      if (sb.active_team_mode === nextTeamMode) return;
+      if (canEdit && saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        await flushAutoSave();
+      }
+      sb.active_team_mode = nextTeamMode;
+      renderSettingsBar();
+      renderScoreboard(false);
+      if (canEdit) {
+        scheduleAutoSave(50);
+      }
+    }
+
+    // 감점 설정값을 차감할 양수 크기로 변환 (예: -3 -> 3, 3 -> 3)
+    function penaltyDeductionAmount(rawPenalty) {
+      const n = parseInt(rawPenalty, 10) || 0;
+      return Math.abs(n);
+    }
+
+    function getRoundEntry(modeRoundsObj, tIdx, roundNum, maxMembers) {
+      const tKey = `t${tIdx}`;
+      if (!modeRoundsObj[tKey] || typeof modeRoundsObj[tKey] !== "object") {
+        modeRoundsObj[tKey] = {};
+      }
+      const rKey = `r${roundNum}`;
+      if (!modeRoundsObj[tKey][rKey] || typeof modeRoundsObj[tKey][rKey] !== "object") {
+        modeRoundsObj[tKey][rKey] = { kills: [], deaths: [] };
+      }
+      const entry = modeRoundsObj[tKey][rKey];
+      if (!Array.isArray(entry.kills)) entry.kills = [];
+      if (!Array.isArray(entry.deaths)) entry.deaths = [];
+      for (let i = 0; i < maxMembers; i++) {
+        if (entry.kills[i] === undefined) entry.kills[i] = "";
+        if (entry.deaths[i] === undefined) entry.deaths[i] = false;
+      }
+      return entry;
+    }
+
+    function computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers) {
+      const members = teamObj.members || [];
+      let totalKills = 0;
+      let totalDeductions = 0;
+      let totalNet = 0;
+      const roundTotals = [];
+
+      for (let r = 1; r <= maxRounds; r++) {
+        const entry = getRoundEntry(modeRoundsObj, tIdx, r, maxMembers);
+        let rKills = 0;
+        let rDed = 0;
+
+        for (let s = 0; s < maxMembers; s++) {
+          const m = members[s] || {};
+          const kVal = parseFloat(entry.kills[s]);
+          const killsNum = Number.isNaN(kVal) ? 0 : kVal;
+          const isDead = Boolean(entry.deaths[s]);
+          const dedAmt = isDead ? penaltyDeductionAmount(m.penalty) : 0;
+
+          rKills += killsNum;
+          rDed += dedAmt;
+        }
+
+        const rNet = rKills - rDed;
+        totalKills += rKills;
+        totalDeductions += rDed;
+        totalNet += rNet;
+        roundTotals.push({ round: r, kills: rKills, deduction: rDed, net: rNet });
+      }
+
+      return { totalKills, totalDeductions, totalNet, roundTotals };
+    }
+
+    function formatNumberDisplay(val) {
+      if (Number.isInteger(val)) return String(val);
+      return String(Math.round(val * 100) / 100);
+    }
+
+    function renderScoreboard(preserveFocus = false) {
+      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
+      const sb = getScoreboardData();
+      const activeMode = sb.active_team_mode;
+      const tMeta = getTeamModeMeta(activeMode);
+      const mData = getModeData(activeMode);
+      const teamCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const maxRounds = state.max_rounds || 30;
+      const maxMembers = tMeta.max_members || 4;
+      const modeRoundsObj = sb.rounds_by_mode[activeMode];
+      const savedTeams = mData.teams || [];
+      const disAttr = canEdit ? "" : "disabled";
+
+      const container = document.getElementById("mainContent");
+      container.innerHTML = "";
+
+      // 상단 팀별 요약 카드 그리드
+      const summaryGrid = document.createElement("div");
+      summaryGrid.className = "sb-summary-grid";
+      summaryGrid.id = "sbSummaryGrid";
+
+      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
+        const tSaved = savedTeams[tIdx] || {};
+        const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
+        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
+
+        const mini = document.createElement("div");
+        mini.className = "sb-mini-card";
+        mini.dataset.summaryTeamIdx = String(tIdx);
+        mini.innerHTML = `
+          <span class="sb-mini-name">${escapeHtml(teamName)}</span>
+          <span class="sb-mini-score" id="sbMiniScore-${tIdx}">${formatNumberDisplay(totals.totalNet)}점</span>
+        `;
+        summaryGrid.appendChild(mini);
+      }
+      container.appendChild(summaryGrid);
+
+      // 각 팀별 1~30라운드 상세 기록표
+      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
+        const tSaved = savedTeams[tIdx] || {};
+        const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
+        const members = tSaved.members || [];
+        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
+
+        const card = document.createElement("div");
+        card.className = "sb-team-card";
+
+        const topBar = document.createElement("div");
+        topBar.className = "sb-team-top";
+        topBar.innerHTML = `
+          <span class="sb-team-title">TEAM ${tIdx + 1} · ${escapeHtml(teamName)}</span>
+          <div class="sb-team-totals" id="sbTeamTotals-${tIdx}">
+            <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
+            <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
+            <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
+          </div>
+        `;
+        card.appendChild(topBar);
+
+        const tableWrap = document.createElement("div");
+        tableWrap.className = "sb-table-wrap";
+
+        let headerHtml = `<thead><tr><th class="round-col">R</th>`;
+        for (let s = 0; s < maxMembers; s++) {
+          const m = members[s] || {};
+          const mLabel = (m.name || "").trim() || `${s + 1}번`;
+          const dedAmt = penaltyDeductionAmount(m.penalty);
+          headerHtml += `
+            <th>${escapeHtml(mLabel)} 킬</th>
+            <th>${escapeHtml(mLabel)} 데스<br><span style="font-size:10px; font-weight:500; color:#fca5a5;">(-${dedAmt})</span></th>
+          `;
+        }
+        headerHtml += `<th>라운드 합</th></tr></thead>`;
+
+        let bodyHtml = `<tbody>`;
+        for (let r = 1; r <= maxRounds; r++) {
+          const entry = getRoundEntry(modeRoundsObj, tIdx, r, maxMembers);
+          const rInfo = totals.roundTotals[r - 1];
+          bodyHtml += `<tr><td class="round-col">${r}R</td>`;
+
+          for (let s = 0; s < maxMembers; s++) {
+            const m = members[s] || {};
+            const dedAmt = penaltyDeductionAmount(m.penalty);
+            const kFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-kill`;
+            const dFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-death`;
+
+            const rawKill = (focusSnap && focusSnap.fieldKey === kFieldKey)
+              ? focusSnap.value
+              : (entry.kills[s] !== undefined && entry.kills[s] !== "" ? entry.kills[s] : "");
+            const isDead = Boolean(entry.deaths[s]);
+
+            bodyHtml += `
+              <td>
+                <input
+                  type="number"
+                  step="any"
+                  class="kill-input"
+                  data-field-key="${kFieldKey}"
+                  data-sb-t="${tIdx}"
+                  data-sb-r="${r}"
+                  data-sb-s="${s}"
+                  value="${escapeHtml(rawKill)}"
+                  placeholder="0"
+                  ${disAttr}
+                />
+              </td>
+              <td>
+                <div class="death-cell-wrap">
+                  <input
+                    type="checkbox"
+                    class="death-chk"
+                    data-field-key="${dFieldKey}"
+                    data-sb-t="${tIdx}"
+                    data-sb-r="${r}"
+                    data-sb-s="${s}"
+                    ${isDead ? "checked" : ""}
+                    ${disAttr}
+                  />
+                  <span class="pen-tag">${isDead ? `-${dedAmt}` : ""}</span>
+                </div>
+              </td>
+            `;
+          }
+
+          bodyHtml += `<td class="round-sum-cell" id="sbRoundSum-${tIdx}-r${r}">${formatNumberDisplay(rInfo.net)}</td></tr>`;
+        }
+        bodyHtml += `</tbody>`;
+
+        tableWrap.innerHTML = `<table class="sb-table">${headerHtml}${bodyHtml}</table>`;
+        card.appendChild(tableWrap);
+        container.appendChild(card);
+
+        if (canEdit) {
+          tableWrap.querySelectorAll(".kill-input").forEach(inp => {
+            inp.addEventListener("input", () => {
+              const ti = parseInt(inp.dataset.sbT, 10);
+              const rn = parseInt(inp.dataset.sbR, 10);
+              const si = parseInt(inp.dataset.sbS, 10);
+              const ent = getRoundEntry(modeRoundsObj, ti, rn, maxMembers);
+              ent.kills[si] = inp.value;
+              refreshScoreboardTeamTotals(ti, tSaved, modeRoundsObj, maxRounds, maxMembers);
+              scheduleAutoSave();
+            });
+          });
+
+          tableWrap.querySelectorAll(".death-chk").forEach(chk => {
+            chk.addEventListener("change", () => {
+              const ti = parseInt(chk.dataset.sbT, 10);
+              const rn = parseInt(chk.dataset.sbR, 10);
+              const si = parseInt(chk.dataset.sbS, 10);
+              const ent = getRoundEntry(modeRoundsObj, ti, rn, maxMembers);
+              ent.deaths[si] = chk.checked;
+
+              const m = (tSaved.members || [])[si] || {};
+              const dedAmt = penaltyDeductionAmount(m.penalty);
+              const tagEl = chk.parentElement ? chk.parentElement.querySelector(".pen-tag") : null;
+              if (tagEl) {
+                tagEl.textContent = chk.checked ? `-${dedAmt}` : "";
+              }
+              refreshScoreboardTeamTotals(ti, tSaved, modeRoundsObj, maxRounds, maxMembers);
+              scheduleAutoSave(50);
+            });
+          });
+        }
+      }
+
+      if (preserveFocus && canEdit) {
+        restoreFocusSnapshot(focusSnap);
+      }
+    }
+
+    function refreshScoreboardTeamTotals(tIdx, teamObj, modeRoundsObj, maxRounds, maxMembers) {
+      const totals = computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers);
+      const miniEl = document.getElementById(`sbMiniScore-${tIdx}`);
+      if (miniEl) {
+        miniEl.textContent = `${formatNumberDisplay(totals.totalNet)}점`;
+      }
+      const topTotalsEl = document.getElementById(`sbTeamTotals-${tIdx}`);
+      if (topTotalsEl) {
+        topTotalsEl.innerHTML = `
+          <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
+          <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
+          <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
+        `;
+      }
+      totals.roundTotals.forEach(rt => {
+        const cellEl = document.getElementById(`sbRoundSum-${tIdx}-r${rt.round}`);
+        if (cellEl) {
+          cellEl.textContent = formatNumberDisplay(rt.net);
+        }
+      });
     }
 
     function addPlayerToTier(tier, inputEl) {
@@ -1427,6 +1993,8 @@ HTML_PAGE = """<!DOCTYPE html>
     function renderMainContent(preserveFocus = false) {
       if (currentMode === "tiers") {
         renderTierBoard(preserveFocus);
+      } else if (currentMode === "scoreboard") {
+        renderScoreboard(preserveFocus);
       } else {
         renderTeams(preserveFocus);
       }
@@ -1497,6 +2065,31 @@ HTML_PAGE = """<!DOCTYPE html>
         renderSettingsBar();
         renderMainContent(false);
         document.getElementById("saveStatus").textContent = "기본 티어표 복원 완료";
+        return;
+      }
+
+      if (currentMode === "scoreboard") {
+        const sb = getScoreboardData();
+        const tMeta = getTeamModeMeta(sb.active_team_mode);
+        if (!confirm(`[점수판 · ${tMeta.label}] 1~30라운드 기록을 초기화할까요?`)) return;
+        const res = await fetch("/api/scoreboard/reset", {
+          method: "POST",
+          headers: authHeaders()
+        });
+        if (res.status === 403) {
+          lockEditor();
+          return;
+        }
+        if (!res.ok) {
+          alert("초기화 중 오류가 발생했습니다.");
+          return;
+        }
+        const result = await res.json();
+        localVersion = Math.max(localVersion, result.version || 0);
+        state.data = result.data;
+        renderSettingsBar();
+        renderMainContent(false);
+        document.getElementById("saveStatus").textContent = "점수판 초기화 완료";
         return;
       }
 
