@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
-EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
+EDIT_PIN = os.environ.get("EDIT_PIN", "1234")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
@@ -1012,33 +1012,30 @@ HTML_PAGE = r"""<!DOCTYPE html>
       min-width: 66px;
     }
 
-    /* 전광판(오버레이 스타일) 뷰 */
+    /* 전광판(오버레이 스타일) 뷰 - 컴팩트 절반 크기 1개 카드 중앙 정렬 */
     .board-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
-      gap: 14px;
-      align-items: start;
-    }
-    @media (max-width: 1120px) {
-      .board-grid {
-        grid-template-columns: 1fr;
-      }
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      width: 100%;
     }
     .match-board-card {
+      width: 100%;
+      max-width: 710px;
       background: #ffffff;
-      border: 2px solid #222222;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+      border: 1.5px solid #222222;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
       overflow: hidden;
     }
     .match-board-header {
-      padding: 9px 10px;
-      border-bottom: 2px solid #222222;
+      padding: 4px 6px;
+      border-bottom: 1.5px solid #222222;
       text-align: center;
-      font-size: 14px;
+      font-size: 11px;
       font-weight: 800;
       color: #111111;
       letter-spacing: -0.2px;
-      line-height: 1.35;
+      line-height: 1.25;
       word-break: keep-all;
     }
     .match-board-header.tone-pink { background: #f8cedc; }
@@ -1047,47 +1044,47 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     .match-board-columns {
       display: grid;
-      border-bottom: 1.5px solid #222222;
+      border-bottom: 1px solid #222222;
     }
     .match-board-col {
-      padding: 8px 6px;
+      padding: 4px 4px;
       text-align: center;
       min-width: 0;
     }
     .match-board-col + .match-board-col {
-      border-left: 1.5px dashed #444444;
+      border-left: 1px dashed #444444;
     }
     .match-board-player {
-      padding: 3px 2px;
-      font-size: 13px;
+      padding: 1px 2px;
+      font-size: 10.5px;
       font-weight: 800;
       color: #111111;
-      line-height: 1.45;
+      line-height: 1.3;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     .match-board-chicken-row {
       display: grid;
-      border-bottom: 1.5px solid #222222;
+      border-bottom: 1px solid #222222;
     }
     .match-board-chicken-cell {
-      padding: 6px 4px;
+      padding: 3px 3px;
       text-align: center;
-      font-size: 13px;
+      font-size: 10.5px;
       font-weight: 800;
       color: #111111;
       min-width: 0;
     }
     .match-board-chicken-cell + .match-board-chicken-cell {
-      border-left: 1.5px dashed #444444;
+      border-left: 1px dashed #444444;
     }
     .match-board-chicken-cell.tone-pink { background: #fce7ee; }
     .match-board-chicken-cell.tone-yellow { background: #fdf3d2; }
     .match-board-chicken-cell.tone-blue { background: #e3effb; }
 
     .match-board-footer {
-      height: 24px;
+      height: 11px;
     }
     .match-board-footer.tone-pink { background: #fce7ee; }
     .match-board-footer.tone-yellow { background: #fdf3d2; }
@@ -1299,7 +1296,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const clean = (rawName || "").trim();
           if (clean) {
             map[clean] = tier;
-            map[clean.replace(/\s+/g, "")] = tier;
+            map[clean.replace(/\\s+/g, "")] = tier;
           }
         });
       });
@@ -1313,7 +1310,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (Object.prototype.hasOwnProperty.call(map, cleaned)) {
         return map[cleaned];
       }
-      const noSpace = cleaned.replace(/\s+/g, "");
+      const noSpace = cleaned.replace(/\\s+/g, "");
       if (Object.prototype.hasOwnProperty.call(map, noSpace)) {
         return map[noSpace];
       }
@@ -1506,7 +1503,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[티어표] 세로 열 시트 스타일 · 세부 등급별 인원 추가/삭제 시 실시간 반영`;
+          `[티어표] 세부 등급별 인원 추가/삭제 시 실시간 반영`;
         leftEl.innerHTML = `
           <strong>전체 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
@@ -1595,7 +1592,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[${meta.label}] AI 밸런스 조절 제외 · 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
+          `[${meta.label}] 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
         leftEl.innerHTML = `
           <label for="teamCountInput"><strong>참가 팀 수</strong></label>
           <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
@@ -1679,7 +1676,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     function computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers) {
       const members = teamObj.members || [];
       let totalKills = 0;
-      let totalDeaths = 0;
       let totalDeductions = 0;
       let totalNet = 0;
       let totalChickens = 0;
@@ -1716,9 +1712,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
         const rNet = rKills - rDed;
         totalKills += rKills;
-        totalDeaths += roundTotals.length === 0
-          ? memberStats.reduce((a, b) => a + b.deaths, 0)
-          : 0;
         totalDeductions += rDed;
         totalNet += rNet;
         totalChickens += rChickens;
@@ -1752,18 +1745,19 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
     }
 
-function renderScoreboardBoardView(preserveFocus = false) {
+    function renderScoreboardBoardView(preserveFocus = false) {
       const focusSnap = preserveFocus ? getFocusSnapshot() : null;
       const sb = getScoreboardData();
       const activeMode = sb.active_team_mode;
       const targetScore = sb.target_score || 300;
       const tMeta = getTeamModeMeta(activeMode);
       const mData = getModeData(activeMode);
-      const teamCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const savedTeams = Array.isArray(mData.teams) ? mData.teams : [];
+      const configuredCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const teamCount = Math.max(configuredCount, savedTeams.length);
       const maxRounds = state.max_rounds || 30;
       const maxMembers = tMeta.max_members || 4;
       const modeRoundsObj = sb.rounds_by_mode[activeMode];
-      const savedTeams = mData.teams || [];
 
       const container = document.getElementById("mainContent");
       container.innerHTML = "";
@@ -1772,7 +1766,7 @@ function renderScoreboardBoardView(preserveFocus = false) {
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const tSaved = savedTeams[tIdx] || {};
         const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
-        const members = tSaved.members || [];
+        const members = Array.isArray(tSaved.members) ? tSaved.members : [];
         const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
 
         const colPlayers = [];
@@ -1856,11 +1850,12 @@ function renderScoreboardBoardView(preserveFocus = false) {
       const activeMode = sb.active_team_mode;
       const tMeta = getTeamModeMeta(activeMode);
       const mData = getModeData(activeMode);
-      const teamCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const savedTeams = Array.isArray(mData.teams) ? mData.teams : [];
+      const configuredCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const teamCount = Math.max(configuredCount, savedTeams.length);
       const maxRounds = state.max_rounds || 30;
       const maxMembers = tMeta.max_members || 4;
       const modeRoundsObj = sb.rounds_by_mode[activeMode];
-      const savedTeams = mData.teams || [];
       const disAttr = canEdit ? "" : "disabled";
 
       const container = document.getElementById("mainContent");
@@ -1889,7 +1884,7 @@ function renderScoreboardBoardView(preserveFocus = false) {
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const tSaved = savedTeams[tIdx] || {};
         const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
-        const members = tSaved.members || [];
+        const members = Array.isArray(tSaved.members) ? tSaved.members : [];
         const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
 
         const card = document.createElement("div");
@@ -2376,6 +2371,12 @@ function renderScoreboardBoardView(preserveFocus = false) {
         clearTimeout(saveTimer);
         saveTimer = null;
         await flushAutoSave();
+      } else if (canEdit && ["solo", "duo", "squad"].includes(currentMode)) {
+        const current = collectCurrentTeamUI();
+        state.data.modes[currentMode] = {
+          team_count: current.team_count,
+          teams: current.teams
+        };
       }
       currentMode = nextMode;
       renderTabs();
