@@ -1648,7 +1648,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
         const viewWrap = document.getElementById("sbViewPills");
         [
-          { key: "table", label: "30라운드 입력표" },
+          { key: "table", label: "점수 입력표" },
           { key: "board", label: "전광판 보기" }
         ].forEach(v => {
           const vBtn = document.createElement("button");
