@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
-EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
+EDIT_PIN = os.environ.get("EDIT_PIN", "1234")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
@@ -1356,7 +1356,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       return { team_count: teamCount, teams, client_id: clientId };
     }
 
-    function scheduleAutoSave(delay = 250) {
+    function scheduleAutoSave(delay = 180) {
       if (!canEdit) return;
       document.getElementById("saveStatus").textContent = "자동 저장 중...";
       if (saveTimer) clearTimeout(saveTimer);
@@ -1395,7 +1395,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           }
           const result = await res.json();
           localVersion = Math.max(localVersion, result.version || 0);
-          state.data = result.data;
+          if (!saveTimer && !pendingSave) {
+            state.data = result.data;
+          }
           document.getElementById("saveStatus").textContent = "실시간 저장 완료";
         } else if (currentMode === "scoreboard") {
           const sb = getScoreboardData();
@@ -1421,7 +1423,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
           }
           const result = await res.json();
           localVersion = Math.max(localVersion, result.version || 0);
-          state.data = result.data;
+          if (!saveTimer && !pendingSave) {
+            state.data.scoreboard.target_score = result.data.scoreboard.target_score;
+            state.data.scoreboard.active_team_mode = result.data.scoreboard.active_team_mode;
+            state.data.scoreboard.view_style = result.data.scoreboard.view_style;
+          }
           document.getElementById("saveStatus").textContent = "실시간 저장 완료";
         } else {
           const modeToSave = currentMode;
@@ -1445,7 +1451,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           }
           const result = await res.json();
           localVersion = Math.max(localVersion, result.version || 0);
-          state.data = result.data;
+          if (!saveTimer && !pendingSave) {
+            state.data.modes[modeToSave] = result.data.modes[modeToSave];
+          }
           document.getElementById("saveStatus").textContent = "실시간 저장 완료";
         }
       } catch (err) {
@@ -1503,7 +1511,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[티어표] 세부 등급별 인원 추가/삭제 시 실시간 반영`;
+          `[티어표] 세로 열 시트 스타일 · 세부 등급별 인원 추가/삭제 시 실시간 반영`;
         leftEl.innerHTML = `
           <strong>전체 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
@@ -1568,19 +1576,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const targetInput = document.getElementById("targetScoreInput");
         if (targetInput && canEdit) {
           targetInput.addEventListener("input", () => {
+            const currentSb = getScoreboardData();
             const val = parseInt(targetInput.value, 10);
-            sb.target_score = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
-            if (sb.view_style === "board") {
+            currentSb.target_score = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
+            if (currentSb.view_style === "board") {
               renderScoreboardBoardView(true);
             }
             scheduleAutoSave();
           });
           targetInput.addEventListener("change", () => {
+            const currentSb = getScoreboardData();
             const val = parseInt(targetInput.value, 10);
             const cleanVal = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
-            sb.target_score = cleanVal;
+            currentSb.target_score = cleanVal;
             targetInput.value = String(cleanVal);
-            if (sb.view_style === "board") {
+            if (currentSb.view_style === "board") {
               renderScoreboardBoardView(true);
             }
             scheduleAutoSave(50);
@@ -1592,7 +1602,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[${meta.label}] 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
+          `[${meta.label}] AI 밸런스 조절 제외 · 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
         leftEl.innerHTML = `
           <label for="teamCountInput"><strong>참가 팀 수</strong></label>
           <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
@@ -1623,7 +1633,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         saveTimer = null;
         await flushAutoSave();
       }
-      sb.active_team_mode = nextTeamMode;
+      getScoreboardData().active_team_mode = nextTeamMode;
       renderSettingsBar();
       renderScoreboard(false);
       if (canEdit) {
@@ -1639,7 +1649,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         saveTimer = null;
         await flushAutoSave();
       }
-      sb.view_style = nextStyle;
+      getScoreboardData().view_style = nextStyle;
       renderSettingsBar();
       renderScoreboard(false);
       if (canEdit) {
@@ -1648,7 +1658,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     function penaltyDeductionAmount(rawPenalty) {
-      const n = parseInt(rawPenalty, 10) || 0;
+      const n = parseInt(rawPenalty, 10);
+      if (Number.isNaN(n)) return 0;
       return Math.abs(n);
     }
 
@@ -1681,7 +1692,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       let totalChickens = 0;
       const memberStats = [];
       for (let s = 0; s < maxMembers; s++) {
-        memberStats.push({ kills: 0, deaths: 0, net: 0, chickens: 0 });
+        memberStats.push({ kills: 0, deaths: 0, deductionTotal: 0, net: 0, chickens: 0 });
       }
       const roundTotals = [];
 
@@ -1705,7 +1716,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
           rChickens += chickNum;
 
           memberStats[s].kills += killsNum;
-          if (isDead) memberStats[s].deaths += 1;
+          if (isDead) {
+            memberStats[s].deaths += 1;
+            memberStats[s].deductionTotal += dedAmt;
+          }
           memberStats[s].net += (killsNum - dedAmt);
           memberStats[s].chickens += chickNum;
         }
@@ -1773,9 +1787,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
         for (let s = 0; s < maxMembers; s++) {
           const m = members[s] || {};
           const mName = (m.name || "").trim() || `${s + 1}번`;
-          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, net: 0, chickens: 0 };
+          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, net: 0, chickens: 0 };
           colPlayers.push({
-            label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(ms.kills)}-${ms.deaths})`,
+            label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(ms.kills)}-${formatNumberDisplay(ms.deductionTotal)})`,
             chickens: ms.chickens
           });
         }
@@ -2000,44 +2014,53 @@ HTML_PAGE = r"""<!DOCTYPE html>
         if (canEdit) {
           tableWrap.querySelectorAll(".kill-input").forEach(inp => {
             inp.addEventListener("input", () => {
+              const latestSb = getScoreboardData();
+              const latestRounds = latestSb.rounds_by_mode[activeMode];
+              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(inp.dataset.sbT, 10)] || tSaved;
               const ti = parseInt(inp.dataset.sbT, 10);
               const rn = parseInt(inp.dataset.sbR, 10);
               const si = parseInt(inp.dataset.sbS, 10);
-              const ent = getRoundEntry(modeRoundsObj, ti, rn, maxMembers);
+              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
               ent.kills[si] = inp.value;
-              refreshScoreboardTeamTotals(ti, tSaved, modeRoundsObj, maxRounds, maxMembers);
+              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers);
               scheduleAutoSave();
             });
           });
 
           tableWrap.querySelectorAll(".death-chk").forEach(chk => {
             chk.addEventListener("change", () => {
+              const latestSb = getScoreboardData();
+              const latestRounds = latestSb.rounds_by_mode[activeMode];
+              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(chk.dataset.sbT, 10)] || tSaved;
               const ti = parseInt(chk.dataset.sbT, 10);
               const rn = parseInt(chk.dataset.sbR, 10);
               const si = parseInt(chk.dataset.sbS, 10);
-              const ent = getRoundEntry(modeRoundsObj, ti, rn, maxMembers);
+              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
               ent.deaths[si] = chk.checked;
 
-              const m = (tSaved.members || [])[si] || {};
+              const m = (latestTeam.members || [])[si] || {};
               const dedAmt = penaltyDeductionAmount(m.penalty);
               const tagEl = chk.parentElement ? chk.parentElement.querySelector(".pen-tag") : null;
               if (tagEl) {
                 tagEl.textContent = chk.checked ? `-${dedAmt}` : "";
               }
-              refreshScoreboardTeamTotals(ti, tSaved, modeRoundsObj, maxRounds, maxMembers);
+              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers);
               scheduleAutoSave(50);
             });
           });
 
           tableWrap.querySelectorAll(".chicken-input").forEach(cinp => {
             cinp.addEventListener("input", () => {
+              const latestSb = getScoreboardData();
+              const latestRounds = latestSb.rounds_by_mode[activeMode];
+              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(cinp.dataset.sbT, 10)] || tSaved;
               const ti = parseInt(cinp.dataset.sbT, 10);
               const rn = parseInt(cinp.dataset.sbR, 10);
               const si = parseInt(cinp.dataset.sbS, 10);
-              const ent = getRoundEntry(modeRoundsObj, ti, rn, maxMembers);
+              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
               const parsed = parseInt(cinp.value, 10);
               ent.chickens[si] = Number.isNaN(parsed) ? 0 : Math.max(0, parsed);
-              refreshScoreboardTeamTotals(ti, tSaved, modeRoundsObj, maxRounds, maxMembers);
+              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers);
               scheduleAutoSave(50);
             });
           });
@@ -2472,7 +2495,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const msg = JSON.parse(event.data);
           if (!msg || typeof msg.version !== "number") return;
           if (msg.version <= localVersion) return;
-          if (saveTimer || isSaving) return;
+          if (saveTimer || isSaving || pendingSave) return;
 
           localVersion = msg.version;
           state.data = msg.data;
