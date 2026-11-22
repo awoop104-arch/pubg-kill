@@ -214,6 +214,8 @@ def default_scoreboard_data():
         "active_team_mode": "solo",
         "view_style": "table",
         "target_score": 300,
+        "big_map_points": 8,
+        "small_map_points": 5,
         "rounds_by_mode": {
             mode_key: {}
             for mode_key, _, _ in TEAM_MODES
@@ -240,6 +242,18 @@ def normalize_scoreboard_data(raw_sb):
         base["target_score"] = max(1, min(999999, target))
     except Exception:
         base["target_score"] = 300
+
+    try:
+        big_pts = int(raw_sb.get("big_map_points", 8))
+        base["big_map_points"] = max(0, min(999, big_pts))
+    except Exception:
+        base["big_map_points"] = 8
+
+    try:
+        small_pts = int(raw_sb.get("small_map_points", 5))
+        base["small_map_points"] = max(0, min(999, small_pts))
+    except Exception:
+        base["small_map_points"] = 5
 
     raw_rounds = raw_sb.get("rounds_by_mode", {})
     if isinstance(raw_rounds, dict):
@@ -329,6 +343,8 @@ class ScoreboardPayload(BaseModel):
     active_team_mode: str = "solo"
     view_style: str = "table"
     target_score: int = 300
+    big_map_points: int = 8
+    small_map_points: int = 5
     rounds_by_mode: dict = {}
     client_id: str = ""
 
@@ -442,6 +458,8 @@ def update_scoreboard(payload: ScoreboardPayload, request: Request):
             "active_team_mode": payload.active_team_mode,
             "view_style": payload.view_style,
             "target_score": payload.target_score,
+            "big_map_points": payload.big_map_points,
+            "small_map_points": payload.small_map_points,
             "rounds_by_mode": payload.rounds_by_mode,
         })
         save_db(data)
@@ -582,14 +600,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .target-inline {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 4px;
       font-size: 13px;
       font-weight: 700;
       color: #0f172a;
     }
     .target-input {
-      width: 78px !important;
-      padding: 5px 7px !important;
+      width: 68px !important;
+      padding: 5px 6px !important;
+      font-size: 13px !important;
+      font-weight: 700;
+      text-align: center;
+    }
+    .pts-input {
+      width: 52px !important;
+      padding: 5px 5px !important;
       font-size: 13px !important;
       font-weight: 700;
       text-align: center;
@@ -882,7 +907,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
     .sb-summary-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
       gap: 10px;
       margin-bottom: 14px;
     }
@@ -905,9 +930,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
       white-space: nowrap;
     }
     .sb-mini-score {
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 800;
       color: #0f766e;
+      white-space: nowrap;
     }
     .sb-team-card {
       background: #fff;
@@ -983,11 +1009,26 @@ HTML_PAGE = r"""<!DOCTYPE html>
       font-size: 12px;
       text-align: right;
     }
-    .chicken-input {
-      width: 48px;
-      padding: 4px 5px;
-      font-size: 12px;
-      text-align: center;
+    .map-chk-group {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .map-chk-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #0f172a;
+      cursor: pointer;
+    }
+    .map-chk {
+      width: 14px;
+      height: 14px;
+      cursor: pointer;
+      margin: 0;
     }
     .death-cell-wrap {
       display: inline-flex;
@@ -1251,6 +1292,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
           active_team_mode: "solo",
           view_style: "table",
           target_score: 300,
+          big_map_points: 8,
+          small_map_points: 5,
           rounds_by_mode: { solo: {}, duo: {}, squad: {} }
         };
       }
@@ -1272,6 +1315,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
       state.data.scoreboard.target_score = Number.isNaN(parsedTarget)
         ? 300
         : Math.max(1, Math.min(999999, parsedTarget));
+
+      const parsedBig = parseInt(state.data.scoreboard.big_map_points, 10);
+      state.data.scoreboard.big_map_points = Number.isNaN(parsedBig)
+        ? 8
+        : Math.max(0, Math.min(999, parsedBig));
+
+      const parsedSmall = parseInt(state.data.scoreboard.small_map_points, 10);
+      state.data.scoreboard.small_map_points = Number.isNaN(parsedSmall)
+        ? 5
+        : Math.max(0, Math.min(999, parsedSmall));
+
       return state.data.scoreboard;
     }
 
@@ -1405,6 +1459,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
             active_team_mode: sb.active_team_mode,
             view_style: sb.view_style,
             target_score: sb.target_score,
+            big_map_points: sb.big_map_points,
+            small_map_points: sb.small_map_points,
             rounds_by_mode: sb.rounds_by_mode,
             client_id: clientId
           };
@@ -1425,6 +1481,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
           localVersion = Math.max(localVersion, result.version || 0);
           if (!saveTimer && !pendingSave) {
             state.data.scoreboard.target_score = result.data.scoreboard.target_score;
+            state.data.scoreboard.big_map_points = result.data.scoreboard.big_map_points;
+            state.data.scoreboard.small_map_points = result.data.scoreboard.small_map_points;
             state.data.scoreboard.active_team_mode = result.data.scoreboard.active_team_mode;
             state.data.scoreboard.view_style = result.data.scoreboard.view_style;
           }
@@ -1522,19 +1580,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const activeMode = sb.active_team_mode;
         const viewStyle = sb.view_style;
         const targetScore = sb.target_score;
+        const bigPts = sb.big_map_points;
+        const smallPts = sb.small_map_points;
         const tMeta = getTeamModeMeta(activeMode);
         const mData = getModeData(activeMode);
         const tCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[점수판 · ${tMeta.label}] 목표 ${targetScore}점 · ${viewStyle === "board" ? "전광판 뷰" : "30라운드 입력표"}`;
+          `[점수판 · ${tMeta.label}] 목표 ${targetScore}점 · 큰맵 +${bigPts} / 작은맵 +${smallPts}`;
         leftEl.innerHTML = `
           <strong>모드</strong>
           <div class="submode-pills" id="sbModePills"></div>
           <strong>보기 전환</strong>
           <div class="submode-pills" id="sbViewPills"></div>
           <label class="target-inline" for="targetScoreInput">
-            <span>목표점수</span>
+            <span>목표</span>
             <input
               type="number"
               id="targetScoreInput"
@@ -1543,6 +1603,32 @@ HTML_PAGE = r"""<!DOCTYPE html>
               min="1"
               max="999999"
               value="${escapeHtml(targetScore)}"
+              ${canEdit ? "" : "disabled"}
+            />
+          </label>
+          <label class="target-inline" for="bigMapPtsInput">
+            <span>큰맵점수</span>
+            <input
+              type="number"
+              id="bigMapPtsInput"
+              class="pts-input"
+              data-field-key="sb-big-pts"
+              min="0"
+              max="999"
+              value="${escapeHtml(bigPts)}"
+              ${canEdit ? "" : "disabled"}
+            />
+          </label>
+          <label class="target-inline" for="smallMapPtsInput">
+            <span>작은맵점수</span>
+            <input
+              type="number"
+              id="smallMapPtsInput"
+              class="pts-input"
+              data-field-key="sb-small-pts"
+              min="0"
+              max="999"
+              value="${escapeHtml(smallPts)}"
               ${canEdit ? "" : "disabled"}
             />
           </label>
@@ -1593,6 +1679,46 @@ HTML_PAGE = r"""<!DOCTYPE html>
             if (currentSb.view_style === "board") {
               renderScoreboardBoardView(true);
             }
+            scheduleAutoSave(50);
+          });
+        }
+
+        const bigInput = document.getElementById("bigMapPtsInput");
+        if (bigInput && canEdit) {
+          bigInput.addEventListener("input", () => {
+            const currentSb = getScoreboardData();
+            const val = parseInt(bigInput.value, 10);
+            currentSb.big_map_points = Number.isNaN(val) ? 8 : Math.max(0, Math.min(999, val));
+            recomputeAllScoreboardTeamsLive();
+            scheduleAutoSave();
+          });
+          bigInput.addEventListener("change", () => {
+            const currentSb = getScoreboardData();
+            const val = parseInt(bigInput.value, 10);
+            const cleanVal = Number.isNaN(val) ? 8 : Math.max(0, Math.min(999, val));
+            currentSb.big_map_points = cleanVal;
+            bigInput.value = String(cleanVal);
+            recomputeAllScoreboardTeamsLive();
+            scheduleAutoSave(50);
+          });
+        }
+
+        const smallInput = document.getElementById("smallMapPtsInput");
+        if (smallInput && canEdit) {
+          smallInput.addEventListener("input", () => {
+            const currentSb = getScoreboardData();
+            const val = parseInt(smallInput.value, 10);
+            currentSb.small_map_points = Number.isNaN(val) ? 5 : Math.max(0, Math.min(999, val));
+            recomputeAllScoreboardTeamsLive();
+            scheduleAutoSave();
+          });
+          smallInput.addEventListener("change", () => {
+            const currentSb = getScoreboardData();
+            const val = parseInt(smallInput.value, 10);
+            const cleanVal = Number.isNaN(val) ? 5 : Math.max(0, Math.min(999, val));
+            currentSb.small_map_points = cleanVal;
+            smallInput.value = String(cleanVal);
+            recomputeAllScoreboardTeamsLive();
             scheduleAutoSave(50);
           });
         }
@@ -1670,29 +1796,44 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
       const rKey = `r${roundNum}`;
       if (!modeRoundsObj[tKey][rKey] || typeof modeRoundsObj[tKey][rKey] !== "object") {
-        modeRoundsObj[tKey][rKey] = { kills: [], deaths: [], chickens: [] };
+        modeRoundsObj[tKey][rKey] = {
+          kills: [],
+          deaths: [],
+          big_map: false,
+          small_map: false
+        };
       }
       const entry = modeRoundsObj[tKey][rKey];
       if (!Array.isArray(entry.kills)) entry.kills = [];
       if (!Array.isArray(entry.deaths)) entry.deaths = [];
-      if (!Array.isArray(entry.chickens)) entry.chickens = [];
+      if (typeof entry.big_map !== "boolean") entry.big_map = Boolean(entry.big_map);
+      if (typeof entry.small_map !== "boolean") entry.small_map = Boolean(entry.small_map);
       for (let i = 0; i < maxMembers; i++) {
         if (entry.kills[i] === undefined) entry.kills[i] = "";
         if (entry.deaths[i] === undefined) entry.deaths[i] = false;
-        if (entry.chickens[i] === undefined) entry.chickens[i] = 0;
       }
       return entry;
     }
 
-    function computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers) {
+    function computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers, sb = null) {
+      const scoreCfg = sb || getScoreboardData();
+      const bigPts = parseInt(scoreCfg.big_map_points, 10);
+      const smallPts = parseInt(scoreCfg.small_map_points, 10);
+      const bigVal = Number.isNaN(bigPts) ? 8 : bigPts;
+      const smallVal = Number.isNaN(smallPts) ? 5 : smallPts;
+
       const members = teamObj.members || [];
       let totalKills = 0;
       let totalDeductions = 0;
-      let totalNet = 0;
+      let totalChickenPoints = 0;
       let totalChickens = 0;
+      let bigMapCount = 0;
+      let smallMapCount = 0;
+      let totalNet = 0;
+
       const memberStats = [];
       for (let s = 0; s < maxMembers; s++) {
-        memberStats.push({ kills: 0, deaths: 0, deductionTotal: 0, net: 0, chickens: 0 });
+        memberStats.push({ kills: 0, deaths: 0, deductionTotal: 0, net: 0 });
       }
       const roundTotals = [];
 
@@ -1700,7 +1841,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const entry = getRoundEntry(modeRoundsObj, tIdx, r, maxMembers);
         let rKills = 0;
         let rDed = 0;
-        let rChickens = 0;
 
         for (let s = 0; s < maxMembers; s++) {
           const m = members[s] || {};
@@ -1708,12 +1848,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const killsNum = Number.isNaN(kVal) ? 0 : kVal;
           const isDead = Boolean(entry.deaths[s]);
           const dedAmt = isDead ? penaltyDeductionAmount(m.penalty) : 0;
-          const cVal = parseInt(entry.chickens[s], 10);
-          const chickNum = Number.isNaN(cVal) ? 0 : Math.max(0, cVal);
 
           rKills += killsNum;
           rDed += dedAmt;
-          rChickens += chickNum;
 
           memberStats[s].kills += killsNum;
           if (isDead) {
@@ -1721,15 +1858,30 @@ HTML_PAGE = r"""<!DOCTYPE html>
             memberStats[s].deductionTotal += dedAmt;
           }
           memberStats[s].net += (killsNum - dedAmt);
-          memberStats[s].chickens += chickNum;
         }
 
-        const rNet = rKills - rDed;
+        const isBig = Boolean(entry.big_map);
+        const isSmall = Boolean(entry.small_map);
+        const rChickenPts = (isBig ? bigVal : 0) + (isSmall ? smallVal : 0);
+        const rChickenCnt = (isBig ? 1 : 0) + (isSmall ? 1 : 0);
+
+        if (isBig) bigMapCount += 1;
+        if (isSmall) smallMapCount += 1;
+
+        const rNet = rKills - rDed + rChickenPts;
         totalKills += rKills;
         totalDeductions += rDed;
+        totalChickenPoints += rChickenPts;
+        totalChickens += rChickenCnt;
         totalNet += rNet;
-        totalChickens += rChickens;
-        roundTotals.push({ round: r, kills: rKills, deduction: rDed, net: rNet, chickens: rChickens });
+
+        roundTotals.push({
+          round: r,
+          kills: rKills,
+          deduction: rDed,
+          chickenPoints: rChickenPts,
+          net: rNet
+        });
       }
 
       const sumAllDeaths = memberStats.reduce((acc, ms) => acc + ms.deaths, 0);
@@ -1738,8 +1890,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
         totalKills,
         totalDeaths: sumAllDeaths,
         totalDeductions,
-        totalNet,
+        totalChickenPoints,
         totalChickens,
+        bigMapCount,
+        smallMapCount,
+        totalNet,
         memberStats,
         roundTotals
       };
@@ -1781,16 +1936,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const tSaved = savedTeams[tIdx] || {};
         const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
         const members = Array.isArray(tSaved.members) ? tSaved.members : [];
-        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
+        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
 
         const colPlayers = [];
         for (let s = 0; s < maxMembers; s++) {
           const m = members[s] || {};
           const mName = (m.name || "").trim() || `${s + 1}번`;
-          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, net: 0, chickens: 0 };
+          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, net: 0 };
           colPlayers.push({
             label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(ms.kills)}-${formatNumberDisplay(ms.deductionTotal)})`,
-            chickens: ms.chickens
           });
         }
 
@@ -1798,6 +1952,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           idx: tIdx,
           name: teamName,
           netScore: totals.totalNet,
+          totalKills: totals.totalKills,
           chickens: totals.totalChickens,
           colPlayers
         });
@@ -1841,7 +1996,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       teamSummaries.forEach(t => {
         const cCell = document.createElement("div");
         cCell.className = `match-board-chicken-cell ${toneClass}`;
-        cCell.textContent = `🍗 : ${t.chickens}`;
+        cCell.textContent = `🍗 : [ ${formatNumberDisplay(t.totalKills)} ]`;
         chickenRow.appendChild(cCell);
       });
       boardCard.appendChild(chickenRow);
@@ -1882,7 +2037,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const tSaved = savedTeams[tIdx] || {};
         const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
-        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
+        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
 
         const mini = document.createElement("div");
         mini.className = "sb-mini-card";
@@ -1899,7 +2054,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const tSaved = savedTeams[tIdx] || {};
         const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
         const members = Array.isArray(tSaved.members) ? tSaved.members : [];
-        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
+        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
 
         const card = document.createElement("div");
         card.className = "sb-team-card";
@@ -1912,7 +2067,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
             <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
             <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
-            <span>🍗 치킨: ${totals.totalChickens}</span>
+            <span>🍗 치킨점수: +${formatNumberDisplay(totals.totalChickenPoints)} (큰${totals.bigMapCount}/작${totals.smallMapCount})</span>
           </div>
         `;
         card.appendChild(topBar);
@@ -1928,10 +2083,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           headerHtml += `
             <th>${escapeHtml(mLabel)} 킬</th>
             <th>${escapeHtml(mLabel)} 데스<br><span style="font-size:10px; font-weight:500; color:#fca5a5;">(-${dedAmt})</span></th>
-            <th>${escapeHtml(mLabel)} 🍗</th>
           `;
         }
-        headerHtml += `<th>라운드 합</th></tr></thead>`;
+        headerHtml += `<th>팀 치킨(큰맵/작은맵)</th><th>라운드 합</th></tr></thead>`;
 
         let bodyHtml = `<tbody>`;
         for (let r = 1; r <= maxRounds; r++) {
@@ -1944,15 +2098,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
             const dedAmt = penaltyDeductionAmount(m.penalty);
             const kFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-kill`;
             const dFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-death`;
-            const cFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-chicken`;
 
             const rawKill = (focusSnap && focusSnap.fieldKey === kFieldKey)
               ? focusSnap.value
               : (entry.kills[s] !== undefined && entry.kills[s] !== "" ? entry.kills[s] : "");
             const isDead = Boolean(entry.deaths[s]);
-            const rawChicken = (focusSnap && focusSnap.fieldKey === cFieldKey)
-              ? focusSnap.value
-              : (entry.chickens[s] !== undefined ? entry.chickens[s] : 0);
 
             bodyHtml += `
               <td>
@@ -1984,26 +2134,45 @@ HTML_PAGE = r"""<!DOCTYPE html>
                   <span class="pen-tag">${isDead ? `-${dedAmt}` : ""}</span>
                 </div>
               </td>
-              <td>
-                <input
-                  type="number"
-                  min="0"
-                  max="99"
-                  step="1"
-                  class="chicken-input"
-                  data-field-key="${cFieldKey}"
-                  data-sb-t="${tIdx}"
-                  data-sb-r="${r}"
-                  data-sb-s="${s}"
-                  value="${escapeHtml(rawChicken)}"
-                  placeholder="0"
-                  ${disAttr}
-                />
-              </td>
             `;
           }
 
-          bodyHtml += `<td class="round-sum-cell" id="sbRoundSum-${tIdx}-r${r}">${formatNumberDisplay(rInfo.net)}</td></tr>`;
+          const bigFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-bigmap`;
+          const smallFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-smallmap`;
+          const isBigChecked = Boolean(entry.big_map);
+          const isSmallChecked = Boolean(entry.small_map);
+
+          bodyHtml += `
+            <td>
+              <div class="map-chk-group">
+                <label class="map-chk-label">
+                  <input
+                    type="checkbox"
+                    class="map-chk big-map-chk"
+                    data-field-key="${bigFieldKey}"
+                    data-sb-t="${tIdx}"
+                    data-sb-r="${r}"
+                    ${isBigChecked ? "checked" : ""}
+                    ${disAttr}
+                  />
+                  <span>큰맵</span>
+                </label>
+                <label class="map-chk-label">
+                  <input
+                    type="checkbox"
+                    class="map-chk small-map-chk"
+                    data-field-key="${smallFieldKey}"
+                    data-sb-t="${tIdx}"
+                    data-sb-r="${r}"
+                    ${isSmallChecked ? "checked" : ""}
+                    ${disAttr}
+                  />
+                  <span>작은맵</span>
+                </label>
+              </div>
+            </td>
+            <td class="round-sum-cell" id="sbRoundSum-${tIdx}-r${r}">${formatNumberDisplay(rInfo.net)}</td>
+          </tr>`;
         }
         bodyHtml += `</tbody>`;
 
@@ -2022,7 +2191,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
               const si = parseInt(inp.dataset.sbS, 10);
               const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
               ent.kills[si] = inp.value;
-              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers);
+              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
               scheduleAutoSave();
             });
           });
@@ -2044,23 +2213,35 @@ HTML_PAGE = r"""<!DOCTYPE html>
               if (tagEl) {
                 tagEl.textContent = chk.checked ? `-${dedAmt}` : "";
               }
-              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers);
+              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
               scheduleAutoSave(50);
             });
           });
 
-          tableWrap.querySelectorAll(".chicken-input").forEach(cinp => {
-            cinp.addEventListener("input", () => {
+          tableWrap.querySelectorAll(".big-map-chk").forEach(bchk => {
+            bchk.addEventListener("change", () => {
               const latestSb = getScoreboardData();
               const latestRounds = latestSb.rounds_by_mode[activeMode];
-              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(cinp.dataset.sbT, 10)] || tSaved;
-              const ti = parseInt(cinp.dataset.sbT, 10);
-              const rn = parseInt(cinp.dataset.sbR, 10);
-              const si = parseInt(cinp.dataset.sbS, 10);
+              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(bchk.dataset.sbT, 10)] || tSaved;
+              const ti = parseInt(bchk.dataset.sbT, 10);
+              const rn = parseInt(bchk.dataset.sbR, 10);
               const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
-              const parsed = parseInt(cinp.value, 10);
-              ent.chickens[si] = Number.isNaN(parsed) ? 0 : Math.max(0, parsed);
-              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers);
+              ent.big_map = bchk.checked;
+              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
+              scheduleAutoSave(50);
+            });
+          });
+
+          tableWrap.querySelectorAll(".small-map-chk").forEach(schk => {
+            schk.addEventListener("change", () => {
+              const latestSb = getScoreboardData();
+              const latestRounds = latestSb.rounds_by_mode[activeMode];
+              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(schk.dataset.sbT, 10)] || tSaved;
+              const ti = parseInt(schk.dataset.sbT, 10);
+              const rn = parseInt(schk.dataset.sbR, 10);
+              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
+              ent.small_map = schk.checked;
+              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
               scheduleAutoSave(50);
             });
           });
@@ -2072,8 +2253,26 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
     }
 
-    function refreshScoreboardTeamTotals(tIdx, teamObj, modeRoundsObj, maxRounds, maxMembers) {
-      const totals = computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers);
+    function recomputeAllScoreboardTeamsLive() {
+      const sb = getScoreboardData();
+      const activeMode = sb.active_team_mode;
+      const tMeta = getTeamModeMeta(activeMode);
+      const mData = getModeData(activeMode);
+      const savedTeams = Array.isArray(mData.teams) ? mData.teams : [];
+      const configuredCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const teamCount = Math.max(configuredCount, savedTeams.length);
+      const maxRounds = state.max_rounds || 30;
+      const maxMembers = tMeta.max_members || 4;
+      const modeRoundsObj = sb.rounds_by_mode[activeMode];
+
+      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
+        const tSaved = savedTeams[tIdx] || {};
+        refreshScoreboardTeamTotals(tIdx, tSaved, modeRoundsObj, maxRounds, maxMembers, sb);
+      }
+    }
+
+    function refreshScoreboardTeamTotals(tIdx, teamObj, modeRoundsObj, maxRounds, maxMembers, sb = null) {
+      const totals = computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
       const miniEl = document.getElementById(`sbMiniScore-${tIdx}`);
       if (miniEl) {
         miniEl.textContent = `${formatNumberDisplay(totals.totalNet)}점 · 🍗${totals.totalChickens}`;
@@ -2084,7 +2283,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
           <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
           <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
-          <span>🍗 치킨: ${totals.totalChickens}</span>
+          <span>🍗 치킨점수: +${formatNumberDisplay(totals.totalChickenPoints)} (큰${totals.bigMapCount}/작${totals.smallMapCount})</span>
         `;
       }
       totals.roundTotals.forEach(rt => {
