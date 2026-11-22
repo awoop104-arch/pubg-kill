@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
-EDIT_PIN = os.environ.get("EDIT_PIN", "1234")
+EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
@@ -1953,7 +1953,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           name: teamName,
           netScore: totals.totalNet,
           totalKills: totals.totalKills,
-          chickens: totals.totalChickens,
+          chickenPoints: totals.totalChickenPoints,
           colPlayers
         });
       }
@@ -1996,7 +1996,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       teamSummaries.forEach(t => {
         const cCell = document.createElement("div");
         cCell.className = `match-board-chicken-cell ${toneClass}`;
-        cCell.textContent = `🍗 : [ ${formatNumberDisplay(t.chickens)} ]`;
+        cCell.textContent = `🍗 : [ ${formatNumberDisplay(t.chickenPoints)} ]`;
         chickenRow.appendChild(cCell);
       });
       boardCard.appendChild(chickenRow);
@@ -2044,7 +2044,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         mini.dataset.summaryTeamIdx = String(tIdx);
         mini.innerHTML = `
           <span class="sb-mini-name">${escapeHtml(teamName)}</span>
-          <span class="sb-mini-score" id="sbMiniScore-${tIdx}">${formatNumberDisplay(totals.totalNet)}점 · 🍗${totals.totalChickens}</span>
+          <span class="sb-mini-score" id="sbMiniScore-${tIdx}">${formatNumberDisplay(totals.totalNet)}점 · 🍗+${formatNumberDisplay(totals.totalChickenPoints)}</span>
         `;
         summaryGrid.appendChild(mini);
       }
@@ -2275,7 +2275,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const totals = computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
       const miniEl = document.getElementById(`sbMiniScore-${tIdx}`);
       if (miniEl) {
-        miniEl.textContent = `${formatNumberDisplay(totals.totalNet)}점 · 🍗${totals.totalChickens}`;
+        miniEl.textContent = `${formatNumberDisplay(totals.totalNet)}점 · 🍗+${formatNumberDisplay(totals.totalChickenPoints)}`;
       }
       const topTotalsEl = document.getElementById(`sbTeamTotals-${tIdx}`);
       if (topTotalsEl) {
