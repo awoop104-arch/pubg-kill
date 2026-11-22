@@ -558,11 +558,21 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #14b8a6;
     }
 
-    /* 티어표 그리드 스타일 */
+    /* 티어표 4열 그리드 스타일 */
     .tier-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
+    }
+    @media (max-width: 960px) {
+      .tier-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    @media (max-width: 560px) {
+      .tier-grid {
+        grid-template-columns: 1fr;
+      }
     }
     .tier-box {
       background: #fff;
@@ -574,6 +584,7 @@ HTML_PAGE = """<!DOCTYPE html>
       justify-content: space-between;
       gap: 10px;
       box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      min-width: 0;
     }
     .tier-box-header {
       display: flex;
@@ -879,7 +890,7 @@ HTML_PAGE = """<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[티어표] 전체 티어 한눈에 보기 · 티어별 인원 추가/삭제 시 실시간 반영`;
+          `[티어표] 한 줄 4개 보기 · 티어별 인원 추가/삭제 시 실시간 반영`;
         leftEl.innerHTML = `
           <strong>전체 등록 인원</strong>
           <span class="info-text">${totalCount}명 (${state.tiers.length}개 세부 티어)</span>
@@ -916,7 +927,6 @@ HTML_PAGE = """<!DOCTYPE html>
       if (!rawName) return;
 
       const board = getTierBoard();
-      // 기존 다른 티어에 동일 이름이 있으면 중복 제거 후 새 티어로 이동
       state.tiers.forEach(t => {
         board[t] = (board[t] || []).filter(n => n !== rawName);
       });
