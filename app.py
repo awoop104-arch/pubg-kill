@@ -1015,7 +1015,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     /* 전광판(오버레이 스타일) 뷰 */
     .board-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
       gap: 14px;
       align-items: start;
     }
@@ -1752,7 +1752,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
     }
 
-    function renderScoreboardBoardView(preserveFocus = false) {
+function renderScoreboardBoardView(preserveFocus = false) {
       const focusSnap = preserveFocus ? getFocusSnapshot() : null;
       const sb = getScoreboardData();
       const activeMode = sb.active_team_mode;
@@ -1798,59 +1798,51 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const grid = document.createElement("div");
       grid.className = "board-grid";
 
-      for (let cardIdx = 0; cardIdx < teamCount; cardIdx++) {
-        const toneClass = HEADER_TONES[cardIdx % HEADER_TONES.length];
-        const orderedTeams = [];
-        for (let offset = 0; offset < teamCount; offset++) {
-          orderedTeams.push(teamSummaries[(cardIdx + offset) % teamCount]);
-        }
+      const toneClass = HEADER_TONES[0];
+      const headerParts = teamSummaries.map(
+        t => `${escapeHtml(t.name)} ${formatNumberDisplay(t.netScore)}`
+      );
+      const headerText = `[ ${targetScore} ] ${headerParts.join(" : ")}`;
 
-        const headerParts = orderedTeams.map(
-          t => `${escapeHtml(t.name)} ${formatNumberDisplay(t.netScore)}`
-        );
-        const headerText = `[ ${targetScore} ] ${headerParts.join(" : ")}`;
+      const boardCard = document.createElement("div");
+      boardCard.className = "match-board-card";
 
-        const boardCard = document.createElement("div");
-        boardCard.className = "match-board-card";
+      const headerDiv = document.createElement("div");
+      headerDiv.className = `match-board-header ${toneClass}`;
+      headerDiv.textContent = headerText;
+      boardCard.appendChild(headerDiv);
 
-        const headerDiv = document.createElement("div");
-        headerDiv.className = `match-board-header ${toneClass}`;
-        headerDiv.textContent = headerText;
-        boardCard.appendChild(headerDiv);
+      const colsDiv = document.createElement("div");
+      colsDiv.className = "match-board-columns";
+      colsDiv.style.gridTemplateColumns = `repeat(${teamSummaries.length}, minmax(0, 1fr))`;
 
-        const colsDiv = document.createElement("div");
-        colsDiv.className = "match-board-columns";
-        colsDiv.style.gridTemplateColumns = `repeat(${orderedTeams.length}, minmax(0, 1fr))`;
+      teamSummaries.forEach(t => {
+        const colDiv = document.createElement("div");
+        colDiv.className = "match-board-col";
+        colDiv.innerHTML = t.colPlayers
+          .map(p => `<div class="match-board-player" title="${escapeHtml(p.label)}">${escapeHtml(p.label)}</div>`)
+          .join("");
+        colsDiv.appendChild(colDiv);
+      });
+      boardCard.appendChild(colsDiv);
 
-        orderedTeams.forEach(t => {
-          const colDiv = document.createElement("div");
-          colDiv.className = "match-board-col";
-          colDiv.innerHTML = t.colPlayers
-            .map(p => `<div class="match-board-player" title="${escapeHtml(p.label)}">${escapeHtml(p.label)}</div>`)
-            .join("");
-          colsDiv.appendChild(colDiv);
-        });
-        boardCard.appendChild(colsDiv);
+      const chickenRow = document.createElement("div");
+      chickenRow.className = "match-board-chicken-row";
+      chickenRow.style.gridTemplateColumns = `repeat(${teamSummaries.length}, minmax(0, 1fr))`;
 
-        const chickenRow = document.createElement("div");
-        chickenRow.className = "match-board-chicken-row";
-        chickenRow.style.gridTemplateColumns = `repeat(${orderedTeams.length}, minmax(0, 1fr))`;
+      teamSummaries.forEach(t => {
+        const cCell = document.createElement("div");
+        cCell.className = `match-board-chicken-cell ${toneClass}`;
+        cCell.textContent = `🍗 : ${t.chickens}`;
+        chickenRow.appendChild(cCell);
+      });
+      boardCard.appendChild(chickenRow);
 
-        orderedTeams.forEach(t => {
-          const cCell = document.createElement("div");
-          cCell.className = `match-board-chicken-cell ${toneClass}`;
-          cCell.textContent = `🍗 : ${t.chickens}`;
-          chickenRow.appendChild(cCell);
-        });
-        boardCard.appendChild(chickenRow);
+      const footerDiv = document.createElement("div");
+      footerDiv.className = `match-board-footer ${toneClass}`;
+      boardCard.appendChild(footerDiv);
 
-        const footerDiv = document.createElement("div");
-        footerDiv.className = `match-board-footer ${toneClass}`;
-        boardCard.appendChild(footerDiv);
-
-        grid.appendChild(boardCard);
-      }
-
+      grid.appendChild(boardCard);
       container.appendChild(grid);
 
       if (preserveFocus && canEdit) {
