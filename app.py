@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
-EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
+EDIT_PIN = os.environ.get("EDIT_PIN", "1234")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
@@ -44,11 +44,9 @@ TIER_GROUPS = [
 TIERS = [t for _, sub_list in TIER_GROUPS for t in sub_list]
 
 INITIAL_PLAYER_TIER_MAP = {
-    # 0티어
     "킴코": "0티어 중",
     "워커": "0티어 하",
     "푸우": "0티어 하",
-    # 1티어
     "이썹": "1티어 최상",
     "몽지": "1티어 상",
     "대한": "1티어 상",
@@ -65,7 +63,6 @@ INITIAL_PLAYER_TIER_MAP = {
     "임수민": "1티어 하",
     "정우욱": "1티어 하",
     "태민": "1티어 하",
-    # 2티어
     "뒷축": "2티어 최상",
     "까릉": "2티어 최상",
     "도연": "2티어 최상",
@@ -107,7 +104,6 @@ INITIAL_PLAYER_TIER_MAP = {
     "은찌": "2티어 하",
     "적묘": "2티어 하",
     "대희": "2티어 하",
-    # 3티어
     "가을": "3티어 최상",
     "경이": "3티어 최상",
     "천호": "3티어 최상",
@@ -136,7 +132,6 @@ INITIAL_PLAYER_TIER_MAP = {
     "민콩": "3티어 하",
     "재진": "3티어 하",
     "강원": "3티어 하",
-    # 4티어
     "딸지": "4티어 최상",
     "다콤": "4티어 최상",
     "지원": "4티어 최상",
@@ -150,7 +145,6 @@ INITIAL_PLAYER_TIER_MAP = {
     "빈쁘": "4티어 중",
     "봄덕": "4티어 중",
     "쮸정": "4티어 중",
-    # 씨앗
     "포뇨": "씨앗",
     "하녜": "씨앗",
     "가빈": "씨앗",
@@ -218,6 +212,8 @@ def default_mode_data():
 def default_scoreboard_data():
     return {
         "active_team_mode": "solo",
+        "view_style": "table",
+        "target_score": 300,
         "rounds_by_mode": {
             mode_key: {}
             for mode_key, _, _ in TEAM_MODES
@@ -234,6 +230,16 @@ def normalize_scoreboard_data(raw_sb):
     active = str(raw_sb.get("active_team_mode", "solo"))
     if active in valid_team_modes:
         base["active_team_mode"] = active
+
+    view_style = str(raw_sb.get("view_style", "table"))
+    if view_style in {"table", "board"}:
+        base["view_style"] = view_style
+
+    try:
+        target = int(raw_sb.get("target_score", 300))
+        base["target_score"] = max(1, min(999999, target))
+    except Exception:
+        base["target_score"] = 300
 
     raw_rounds = raw_sb.get("rounds_by_mode", {})
     if isinstance(raw_rounds, dict):
@@ -321,11 +327,13 @@ class TierBoardPayload(BaseModel):
 
 class ScoreboardPayload(BaseModel):
     active_team_mode: str = "solo"
+    view_style: str = "table"
+    target_score: int = 300
     rounds_by_mode: dict = {}
     client_id: str = ""
 
 
-app = FastAPI(title="PUBG 킬내기 관리 웹 (실시간 + 티어표 + 점수판)")
+app = FastAPI(title="PUBG 킬내기 관리 웹")
 
 
 @app.post("/api/auth/unlock")
@@ -432,6 +440,8 @@ def update_scoreboard(payload: ScoreboardPayload, request: Request):
         data = load_db()
         data["scoreboard"] = normalize_scoreboard_data({
             "active_team_mode": payload.active_team_mode,
+            "view_style": payload.view_style,
+            "target_score": payload.target_score,
             "rounds_by_mode": payload.rounds_by_mode,
         })
         save_db(data)
@@ -490,7 +500,7 @@ async def stream_state(request: Request):
     )
 
 
-HTML_PAGE = """<!DOCTYPE html>
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
@@ -505,7 +515,7 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #1e242b;
     }
     .wrap {
-      max-width: 1380px;
+      max-width: 1420px;
       margin: 0 auto;
       padding: 18px 16px 48px;
     }
@@ -552,6 +562,7 @@ HTML_PAGE = """<!DOCTYPE html>
     .submode-pills {
       display: inline-flex;
       gap: 5px;
+      flex-wrap: wrap;
     }
     .pill-btn {
       padding: 5px 11px;
@@ -567,6 +578,21 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #0f766e;
       color: #fff;
       border-color: #0f766e;
+    }
+    .target-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #0f172a;
+    }
+    .target-input {
+      width: 78px !important;
+      padding: 5px 7px !important;
+      font-size: 13px !important;
+      font-weight: 700;
+      text-align: center;
     }
     .info-text {
       font-size: 13px;
@@ -666,16 +692,10 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #fff;
       border-color: #1e293b;
     }
-    button.primary:hover:not(:disabled) {
-      background: #0f172a;
-    }
     button.danger {
       background: #fff;
       border-color: #fca5a5;
       color: #b91c1c;
-    }
-    button.danger:hover:not(:disabled) {
-      background: #fef2f2;
     }
     .team-header {
       display: flex;
@@ -749,8 +769,6 @@ HTML_PAGE = """<!DOCTYPE html>
       border-radius: 50%;
       background: #14b8a6;
     }
-
-    /* 시트형 세로 열 티어표 스타일 */
     .tier-groups-wrap {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -793,11 +811,6 @@ HTML_PAGE = """<!DOCTYPE html>
     }
     .subtier-cols.cols-1 {
       grid-template-columns: minmax(0, 1fr);
-    }
-    @media (max-width: 640px) {
-      .subtier-cols.cols-4 {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
     }
     .subtier-col {
       background: #fff;
@@ -849,11 +862,6 @@ HTML_PAGE = """<!DOCTYPE html>
       font-size: 13px;
       line-height: 1;
       cursor: pointer;
-      flex-shrink: 0;
-    }
-    .chip-del:hover:not(:disabled) {
-      color: #dc2626;
-      background: transparent;
     }
     .subtier-add-box {
       padding: 7px;
@@ -871,10 +879,7 @@ HTML_PAGE = """<!DOCTYPE html>
     .subtier-add-btn {
       padding: 4px 8px;
       font-size: 12px;
-      white-space: nowrap;
     }
-
-    /* 점수판(최대 30라운드) 스타일 */
     .sb-summary-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -903,7 +908,6 @@ HTML_PAGE = """<!DOCTYPE html>
       font-size: 15px;
       font-weight: 800;
       color: #0f766e;
-      white-space: nowrap;
     }
     .sb-team-card {
       background: #fff;
@@ -979,6 +983,12 @@ HTML_PAGE = """<!DOCTYPE html>
       font-size: 12px;
       text-align: right;
     }
+    .chicken-input {
+      width: 48px;
+      padding: 4px 5px;
+      font-size: 12px;
+      text-align: center;
+    }
     .death-cell-wrap {
       display: inline-flex;
       align-items: center;
@@ -1001,6 +1011,87 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #f8fafc;
       min-width: 66px;
     }
+
+    /* 전광판(오버레이 스타일) 뷰 */
+    .board-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      align-items: start;
+    }
+    @media (max-width: 1120px) {
+      .board-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .match-board-card {
+      background: #ffffff;
+      border: 2px solid #222222;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+    .match-board-header {
+      padding: 9px 10px;
+      border-bottom: 2px solid #222222;
+      text-align: center;
+      font-size: 14px;
+      font-weight: 800;
+      color: #111111;
+      letter-spacing: -0.2px;
+      line-height: 1.35;
+      word-break: keep-all;
+    }
+    .match-board-header.tone-pink { background: #f8cedc; }
+    .match-board-header.tone-yellow { background: #f8e4a6; }
+    .match-board-header.tone-blue { background: #b8d3f0; }
+
+    .match-board-columns {
+      display: grid;
+      border-bottom: 1.5px solid #222222;
+    }
+    .match-board-col {
+      padding: 8px 6px;
+      text-align: center;
+      min-width: 0;
+    }
+    .match-board-col + .match-board-col {
+      border-left: 1.5px dashed #444444;
+    }
+    .match-board-player {
+      padding: 3px 2px;
+      font-size: 13px;
+      font-weight: 800;
+      color: #111111;
+      line-height: 1.45;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .match-board-chicken-row {
+      display: grid;
+      border-bottom: 1.5px solid #222222;
+    }
+    .match-board-chicken-cell {
+      padding: 6px 4px;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 800;
+      color: #111111;
+      min-width: 0;
+    }
+    .match-board-chicken-cell + .match-board-chicken-cell {
+      border-left: 1.5px dashed #444444;
+    }
+    .match-board-chicken-cell.tone-pink { background: #fce7ee; }
+    .match-board-chicken-cell.tone-yellow { background: #fdf3d2; }
+    .match-board-chicken-cell.tone-blue { background: #e3effb; }
+
+    .match-board-footer {
+      height: 24px;
+    }
+    .match-board-footer.tone-pink { background: #fce7ee; }
+    .match-board-footer.tone-yellow { background: #fdf3d2; }
+    .match-board-footer.tone-blue { background: #e3effb; }
   </style>
 </head>
 <body>
@@ -1039,6 +1130,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <script>
     const clientId = Math.random().toString(36).slice(2);
     const TOKEN_STORAGE_KEY = "pubg_kill_match_edit_token";
+    const HEADER_TONES = ["tone-pink", "tone-yellow", "tone-blue"];
 
     let state = null;
     let currentMode = "solo";
@@ -1158,7 +1250,12 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function getScoreboardData() {
       if (!state.data.scoreboard || typeof state.data.scoreboard !== "object") {
-        state.data.scoreboard = { active_team_mode: "solo", rounds_by_mode: { solo: {}, duo: {}, squad: {} } };
+        state.data.scoreboard = {
+          active_team_mode: "solo",
+          view_style: "table",
+          target_score: 300,
+          rounds_by_mode: { solo: {}, duo: {}, squad: {} }
+        };
       }
       if (!state.data.scoreboard.rounds_by_mode || typeof state.data.scoreboard.rounds_by_mode !== "object") {
         state.data.scoreboard.rounds_by_mode = { solo: {}, duo: {}, squad: {} };
@@ -1171,6 +1268,13 @@ HTML_PAGE = """<!DOCTYPE html>
       if (!["solo", "duo", "squad"].includes(state.data.scoreboard.active_team_mode)) {
         state.data.scoreboard.active_team_mode = "solo";
       }
+      if (!["table", "board"].includes(state.data.scoreboard.view_style)) {
+        state.data.scoreboard.view_style = "table";
+      }
+      const parsedTarget = parseInt(state.data.scoreboard.target_score, 10);
+      state.data.scoreboard.target_score = Number.isNaN(parsedTarget)
+        ? 300
+        : Math.max(1, Math.min(999999, parsedTarget));
       return state.data.scoreboard;
     }
 
@@ -1300,6 +1404,8 @@ HTML_PAGE = """<!DOCTYPE html>
           const sb = getScoreboardData();
           const payload = {
             active_team_mode: sb.active_team_mode,
+            view_style: sb.view_style,
+            target_score: sb.target_score,
             rounds_by_mode: sb.rounds_by_mode,
             client_id: clientId
           };
@@ -1409,16 +1515,33 @@ HTML_PAGE = """<!DOCTYPE html>
       } else if (currentMode === "scoreboard") {
         const sb = getScoreboardData();
         const activeMode = sb.active_team_mode;
+        const viewStyle = sb.view_style;
+        const targetScore = sb.target_score;
         const tMeta = getTeamModeMeta(activeMode);
         const mData = getModeData(activeMode);
         const tCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[점수판 · ${tMeta.label}] 최대 ${state.max_rounds || 30}라운드 · 킬점수 직접 입력 · 데스 체크 시 감점 차감`;
+          `[점수판 · ${tMeta.label}] 목표 ${targetScore}점 · ${viewStyle === "board" ? "전광판 뷰" : "30라운드 입력표"}`;
         leftEl.innerHTML = `
           <strong>모드</strong>
           <div class="submode-pills" id="sbModePills"></div>
-          <span class="info-text">${tCount}팀 (팀당 최대 ${tMeta.max_members}명) · 최대 30라운드</span>
+          <strong>보기 전환</strong>
+          <div class="submode-pills" id="sbViewPills"></div>
+          <label class="target-inline" for="targetScoreInput">
+            <span>목표점수</span>
+            <input
+              type="number"
+              id="targetScoreInput"
+              class="target-input"
+              data-field-key="sb-target-score"
+              min="1"
+              max="999999"
+              value="${escapeHtml(targetScore)}"
+              ${canEdit ? "" : "disabled"}
+            />
+          </label>
+          <span class="info-text">${tCount}팀 · 최대 30라운드</span>
         `;
         resetBtn.textContent = "점수판 초기화";
 
@@ -1431,6 +1554,41 @@ HTML_PAGE = """<!DOCTYPE html>
           pBtn.onclick = () => switchScoreboardTeamMode(tm.key);
           pillsWrap.appendChild(pBtn);
         });
+
+        const viewWrap = document.getElementById("sbViewPills");
+        [
+          { key: "table", label: "30라운드 입력표" },
+          { key: "board", label: "전광판 보기" }
+        ].forEach(v => {
+          const vBtn = document.createElement("button");
+          vBtn.type = "button";
+          vBtn.className = "pill-btn" + (v.key === viewStyle ? " active" : "");
+          vBtn.textContent = v.label;
+          vBtn.onclick = () => switchScoreboardViewStyle(v.key);
+          viewWrap.appendChild(vBtn);
+        });
+
+        const targetInput = document.getElementById("targetScoreInput");
+        if (targetInput && canEdit) {
+          targetInput.addEventListener("input", () => {
+            const val = parseInt(targetInput.value, 10);
+            sb.target_score = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
+            if (sb.view_style === "board") {
+              renderScoreboardBoardView(true);
+            }
+            scheduleAutoSave();
+          });
+          targetInput.addEventListener("change", () => {
+            const val = parseInt(targetInput.value, 10);
+            const cleanVal = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
+            sb.target_score = cleanVal;
+            targetInput.value = String(cleanVal);
+            if (sb.view_style === "board") {
+              renderScoreboardBoardView(true);
+            }
+            scheduleAutoSave(50);
+          });
+        }
       } else {
         const meta = getModeMeta(currentMode);
         const modeData = getModeData(currentMode);
@@ -1476,7 +1634,22 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
-    // 감점 설정값을 차감할 양수 크기로 변환 (예: -3 -> 3, 3 -> 3)
+    async function switchScoreboardViewStyle(nextStyle) {
+      const sb = getScoreboardData();
+      if (sb.view_style === nextStyle) return;
+      if (canEdit && saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        await flushAutoSave();
+      }
+      sb.view_style = nextStyle;
+      renderSettingsBar();
+      renderScoreboard(false);
+      if (canEdit) {
+        scheduleAutoSave(50);
+      }
+    }
+
     function penaltyDeductionAmount(rawPenalty) {
       const n = parseInt(rawPenalty, 10) || 0;
       return Math.abs(n);
@@ -1489,14 +1662,16 @@ HTML_PAGE = """<!DOCTYPE html>
       }
       const rKey = `r${roundNum}`;
       if (!modeRoundsObj[tKey][rKey] || typeof modeRoundsObj[tKey][rKey] !== "object") {
-        modeRoundsObj[tKey][rKey] = { kills: [], deaths: [] };
+        modeRoundsObj[tKey][rKey] = { kills: [], deaths: [], chickens: [] };
       }
       const entry = modeRoundsObj[tKey][rKey];
       if (!Array.isArray(entry.kills)) entry.kills = [];
       if (!Array.isArray(entry.deaths)) entry.deaths = [];
+      if (!Array.isArray(entry.chickens)) entry.chickens = [];
       for (let i = 0; i < maxMembers; i++) {
         if (entry.kills[i] === undefined) entry.kills[i] = "";
         if (entry.deaths[i] === undefined) entry.deaths[i] = false;
+        if (entry.chickens[i] === undefined) entry.chickens[i] = 0;
       }
       return entry;
     }
@@ -1504,14 +1679,21 @@ HTML_PAGE = """<!DOCTYPE html>
     function computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers) {
       const members = teamObj.members || [];
       let totalKills = 0;
+      let totalDeaths = 0;
       let totalDeductions = 0;
       let totalNet = 0;
+      let totalChickens = 0;
+      const memberStats = [];
+      for (let s = 0; s < maxMembers; s++) {
+        memberStats.push({ kills: 0, deaths: 0, net: 0, chickens: 0 });
+      }
       const roundTotals = [];
 
       for (let r = 1; r <= maxRounds; r++) {
         const entry = getRoundEntry(modeRoundsObj, tIdx, r, maxMembers);
         let rKills = 0;
         let rDed = 0;
+        let rChickens = 0;
 
         for (let s = 0; s < maxMembers; s++) {
           const m = members[s] || {};
@@ -1519,19 +1701,41 @@ HTML_PAGE = """<!DOCTYPE html>
           const killsNum = Number.isNaN(kVal) ? 0 : kVal;
           const isDead = Boolean(entry.deaths[s]);
           const dedAmt = isDead ? penaltyDeductionAmount(m.penalty) : 0;
+          const cVal = parseInt(entry.chickens[s], 10);
+          const chickNum = Number.isNaN(cVal) ? 0 : Math.max(0, cVal);
 
           rKills += killsNum;
           rDed += dedAmt;
+          rChickens += chickNum;
+
+          memberStats[s].kills += killsNum;
+          if (isDead) memberStats[s].deaths += 1;
+          memberStats[s].net += (killsNum - dedAmt);
+          memberStats[s].chickens += chickNum;
         }
 
         const rNet = rKills - rDed;
         totalKills += rKills;
+        totalDeaths += roundTotals.length === 0
+          ? memberStats.reduce((a, b) => a + b.deaths, 0)
+          : 0;
         totalDeductions += rDed;
         totalNet += rNet;
-        roundTotals.push({ round: r, kills: rKills, deduction: rDed, net: rNet });
+        totalChickens += rChickens;
+        roundTotals.push({ round: r, kills: rKills, deduction: rDed, net: rNet, chickens: rChickens });
       }
 
-      return { totalKills, totalDeductions, totalNet, roundTotals };
+      const sumAllDeaths = memberStats.reduce((acc, ms) => acc + ms.deaths, 0);
+
+      return {
+        totalKills,
+        totalDeaths: sumAllDeaths,
+        totalDeductions,
+        totalNet,
+        totalChickens,
+        memberStats,
+        roundTotals
+      };
     }
 
     function formatNumberDisplay(val) {
@@ -1540,6 +1744,121 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function renderScoreboard(preserveFocus = false) {
+      const sb = getScoreboardData();
+      if (sb.view_style === "board") {
+        renderScoreboardBoardView(preserveFocus);
+      } else {
+        renderScoreboardTableView(preserveFocus);
+      }
+    }
+
+    function renderScoreboardBoardView(preserveFocus = false) {
+      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
+      const sb = getScoreboardData();
+      const activeMode = sb.active_team_mode;
+      const targetScore = sb.target_score || 300;
+      const tMeta = getTeamModeMeta(activeMode);
+      const mData = getModeData(activeMode);
+      const teamCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const maxRounds = state.max_rounds || 30;
+      const maxMembers = tMeta.max_members || 4;
+      const modeRoundsObj = sb.rounds_by_mode[activeMode];
+      const savedTeams = mData.teams || [];
+
+      const container = document.getElementById("mainContent");
+      container.innerHTML = "";
+
+      const teamSummaries = [];
+      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
+        const tSaved = savedTeams[tIdx] || {};
+        const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
+        const members = tSaved.members || [];
+        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers);
+
+        const colPlayers = [];
+        for (let s = 0; s < maxMembers; s++) {
+          const m = members[s] || {};
+          const mName = (m.name || "").trim() || `${s + 1}번`;
+          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, net: 0, chickens: 0 };
+          colPlayers.push({
+            label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(ms.kills)}-${ms.deaths})`,
+            chickens: ms.chickens
+          });
+        }
+
+        teamSummaries.push({
+          idx: tIdx,
+          name: teamName,
+          netScore: totals.totalNet,
+          chickens: totals.totalChickens,
+          colPlayers
+        });
+      }
+
+      const grid = document.createElement("div");
+      grid.className = "board-grid";
+
+      for (let cardIdx = 0; cardIdx < teamCount; cardIdx++) {
+        const toneClass = HEADER_TONES[cardIdx % HEADER_TONES.length];
+        const orderedTeams = [];
+        for (let offset = 0; offset < teamCount; offset++) {
+          orderedTeams.push(teamSummaries[(cardIdx + offset) % teamCount]);
+        }
+
+        const headerParts = orderedTeams.map(
+          t => `${escapeHtml(t.name)} ${formatNumberDisplay(t.netScore)}`
+        );
+        const headerText = `[ ${targetScore} ] ${headerParts.join(" : ")}`;
+
+        const boardCard = document.createElement("div");
+        boardCard.className = "match-board-card";
+
+        const headerDiv = document.createElement("div");
+        headerDiv.className = `match-board-header ${toneClass}`;
+        headerDiv.textContent = headerText;
+        boardCard.appendChild(headerDiv);
+
+        const colsDiv = document.createElement("div");
+        colsDiv.className = "match-board-columns";
+        colsDiv.style.gridTemplateColumns = `repeat(${orderedTeams.length}, minmax(0, 1fr))`;
+
+        orderedTeams.forEach(t => {
+          const colDiv = document.createElement("div");
+          colDiv.className = "match-board-col";
+          colDiv.innerHTML = t.colPlayers
+            .map(p => `<div class="match-board-player" title="${escapeHtml(p.label)}">${escapeHtml(p.label)}</div>`)
+            .join("");
+          colsDiv.appendChild(colDiv);
+        });
+        boardCard.appendChild(colsDiv);
+
+        const chickenRow = document.createElement("div");
+        chickenRow.className = "match-board-chicken-row";
+        chickenRow.style.gridTemplateColumns = `repeat(${orderedTeams.length}, minmax(0, 1fr))`;
+
+        orderedTeams.forEach(t => {
+          const cCell = document.createElement("div");
+          cCell.className = `match-board-chicken-cell ${toneClass}`;
+          cCell.textContent = `🍗 : ${t.chickens}`;
+          chickenRow.appendChild(cCell);
+        });
+        boardCard.appendChild(chickenRow);
+
+        const footerDiv = document.createElement("div");
+        footerDiv.className = `match-board-footer ${toneClass}`;
+        boardCard.appendChild(footerDiv);
+
+        grid.appendChild(boardCard);
+      }
+
+      container.appendChild(grid);
+
+      if (preserveFocus && canEdit) {
+        restoreFocusSnapshot(focusSnap);
+      }
+    }
+
+    function renderScoreboardTableView(preserveFocus = false) {
       const focusSnap = preserveFocus ? getFocusSnapshot() : null;
       const sb = getScoreboardData();
       const activeMode = sb.active_team_mode;
@@ -1555,7 +1874,6 @@ HTML_PAGE = """<!DOCTYPE html>
       const container = document.getElementById("mainContent");
       container.innerHTML = "";
 
-      // 상단 팀별 요약 카드 그리드
       const summaryGrid = document.createElement("div");
       summaryGrid.className = "sb-summary-grid";
       summaryGrid.id = "sbSummaryGrid";
@@ -1570,13 +1888,12 @@ HTML_PAGE = """<!DOCTYPE html>
         mini.dataset.summaryTeamIdx = String(tIdx);
         mini.innerHTML = `
           <span class="sb-mini-name">${escapeHtml(teamName)}</span>
-          <span class="sb-mini-score" id="sbMiniScore-${tIdx}">${formatNumberDisplay(totals.totalNet)}점</span>
+          <span class="sb-mini-score" id="sbMiniScore-${tIdx}">${formatNumberDisplay(totals.totalNet)}점 · 🍗${totals.totalChickens}</span>
         `;
         summaryGrid.appendChild(mini);
       }
       container.appendChild(summaryGrid);
 
-      // 각 팀별 1~30라운드 상세 기록표
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const tSaved = savedTeams[tIdx] || {};
         const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
@@ -1594,6 +1911,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
             <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
             <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
+            <span>🍗 치킨: ${totals.totalChickens}</span>
           </div>
         `;
         card.appendChild(topBar);
@@ -1609,6 +1927,7 @@ HTML_PAGE = """<!DOCTYPE html>
           headerHtml += `
             <th>${escapeHtml(mLabel)} 킬</th>
             <th>${escapeHtml(mLabel)} 데스<br><span style="font-size:10px; font-weight:500; color:#fca5a5;">(-${dedAmt})</span></th>
+            <th>${escapeHtml(mLabel)} 🍗</th>
           `;
         }
         headerHtml += `<th>라운드 합</th></tr></thead>`;
@@ -1624,11 +1943,15 @@ HTML_PAGE = """<!DOCTYPE html>
             const dedAmt = penaltyDeductionAmount(m.penalty);
             const kFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-kill`;
             const dFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-death`;
+            const cFieldKey = `sb-${activeMode}-t${tIdx}-r${r}-s${s}-chicken`;
 
             const rawKill = (focusSnap && focusSnap.fieldKey === kFieldKey)
               ? focusSnap.value
               : (entry.kills[s] !== undefined && entry.kills[s] !== "" ? entry.kills[s] : "");
             const isDead = Boolean(entry.deaths[s]);
+            const rawChicken = (focusSnap && focusSnap.fieldKey === cFieldKey)
+              ? focusSnap.value
+              : (entry.chickens[s] !== undefined ? entry.chickens[s] : 0);
 
             bodyHtml += `
               <td>
@@ -1659,6 +1982,22 @@ HTML_PAGE = """<!DOCTYPE html>
                   />
                   <span class="pen-tag">${isDead ? `-${dedAmt}` : ""}</span>
                 </div>
+              </td>
+              <td>
+                <input
+                  type="number"
+                  min="0"
+                  max="99"
+                  step="1"
+                  class="chicken-input"
+                  data-field-key="${cFieldKey}"
+                  data-sb-t="${tIdx}"
+                  data-sb-r="${r}"
+                  data-sb-s="${s}"
+                  value="${escapeHtml(rawChicken)}"
+                  placeholder="0"
+                  ${disAttr}
+                />
               </td>
             `;
           }
@@ -1702,6 +2041,19 @@ HTML_PAGE = """<!DOCTYPE html>
               scheduleAutoSave(50);
             });
           });
+
+          tableWrap.querySelectorAll(".chicken-input").forEach(cinp => {
+            cinp.addEventListener("input", () => {
+              const ti = parseInt(cinp.dataset.sbT, 10);
+              const rn = parseInt(cinp.dataset.sbR, 10);
+              const si = parseInt(cinp.dataset.sbS, 10);
+              const ent = getRoundEntry(modeRoundsObj, ti, rn, maxMembers);
+              const parsed = parseInt(cinp.value, 10);
+              ent.chickens[si] = Number.isNaN(parsed) ? 0 : Math.max(0, parsed);
+              refreshScoreboardTeamTotals(ti, tSaved, modeRoundsObj, maxRounds, maxMembers);
+              scheduleAutoSave(50);
+            });
+          });
         }
       }
 
@@ -1714,7 +2066,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const totals = computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers);
       const miniEl = document.getElementById(`sbMiniScore-${tIdx}`);
       if (miniEl) {
-        miniEl.textContent = `${formatNumberDisplay(totals.totalNet)}점`;
+        miniEl.textContent = `${formatNumberDisplay(totals.totalNet)}점 · 🍗${totals.totalChickens}`;
       }
       const topTotalsEl = document.getElementById(`sbTeamTotals-${tIdx}`);
       if (topTotalsEl) {
@@ -1722,6 +2074,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
           <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
           <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
+          <span>🍗 치킨: ${totals.totalChickens}</span>
         `;
       }
       totals.roundTotals.forEach(rt => {
@@ -2166,4 +2519,4 @@ def index():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
