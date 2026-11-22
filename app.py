@@ -18,14 +18,16 @@ MODES = [
     ("tiers", "티어표", 0),
 ]
 
-TIERS = [
-    "0티어 최상", "0티어 상", "0티어 중", "0티어 하",
-    "1티어 최상", "1티어 상", "1티어 중", "1티어 하",
-    "2티어 최상", "2티어 상", "2티어 중", "2티어 하",
-    "3티어 최상", "3티어 상", "3티어 중", "3티어 하",
-    "4티어 최상", "4티어 상", "4티어 중", "4티어 하",
-    "씨앗",
+TIER_GROUPS = [
+    ("0티어", ["0티어 최상", "0티어 상", "0티어 중", "0티어 하"]),
+    ("1티어", ["1티어 최상", "1티어 상", "1티어 중", "1티어 하"]),
+    ("2티어", ["2티어 최상", "2티어 상", "2티어 중", "2티어 하"]),
+    ("3티어", ["3티어 최상", "3티어 상", "3티어 중", "3티어 하"]),
+    ("4티어", ["4티어 최상", "4티어 상", "4티어 중", "4티어 하"]),
+    ("씨앗", ["씨앗"]),
 ]
+
+TIERS = [t for _, sub_list in TIER_GROUPS for t in sub_list]
 
 INITIAL_PLAYER_TIER_MAP = {
     # 0티어
@@ -266,6 +268,10 @@ def get_state():
         "modes_meta": [
             {"key": k, "label": label, "max_members": max_m}
             for k, label, max_m in MODES
+        ],
+        "tier_groups": [
+            {"group": g, "tiers": sub}
+            for g, sub in TIER_GROUPS
         ],
         "tiers": TIERS,
         "tier_board": data["tier_board"],
@@ -558,95 +564,126 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #14b8a6;
     }
 
-    /* 티어표 4열 그리드 스타일 */
-    .tier-grid {
+    /* 시트형 세로 열 티어표 스타일 */
+    .tier-groups-wrap {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
     }
-    @media (max-width: 960px) {
-      .tier-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-    }
-    @media (max-width: 560px) {
-      .tier-grid {
+    @media (max-width: 980px) {
+      .tier-groups-wrap {
         grid-template-columns: 1fr;
       }
     }
-    .tier-box {
+    .tier-group-card {
       background: #fff;
       border: 1px solid #e2e8f0;
       border-radius: 12px;
-      padding: 12px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .tier-group-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: #1e293b;
+      color: #fff;
+      font-weight: 800;
+      font-size: 15px;
+    }
+    .tier-group-count {
+      font-size: 12px;
+      font-weight: 700;
+      color: #cbd5e1;
+    }
+    .subtier-cols {
+      display: grid;
+      gap: 1px;
+      background: #e2e8f0;
+    }
+    .subtier-cols.cols-4 {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .subtier-cols.cols-1 {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    @media (max-width: 640px) {
+      .subtier-cols.cols-4 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    .subtier-col {
+      background: #fff;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      gap: 10px;
-      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
       min-width: 0;
     }
-    .tier-box-header {
+    .subtier-col-header {
+      padding: 7px 8px;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 800;
+      color: #0f172a;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .subtier-vertical-list {
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      flex: 1;
+      min-height: 92px;
+    }
+    .vertical-member-item {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      border-bottom: 1px solid #f1f5f9;
-      padding-bottom: 6px;
-    }
-    .tier-name-badge {
-      font-size: 14px;
-      font-weight: 800;
-      color: #0f172a;
-    }
-    .tier-count {
-      font-size: 12px;
-      font-weight: 700;
-      color: #64748b;
-    }
-    .tier-members {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-      min-height: 36px;
-      align-content: flex-start;
-    }
-    .member-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      background: #f8fafc;
-      border: 1px solid #cbd5e1;
-      border-radius: 999px;
-      padding: 3px 9px;
+      gap: 4px;
+      padding: 4px 7px;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      background: #fcfcfd;
       font-size: 12px;
       font-weight: 600;
       color: #1e293b;
+    }
+    .vertical-member-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .chip-del {
       border: none;
       background: transparent;
       color: #94a3b8;
       padding: 0 2px;
-      font-size: 12px;
+      font-size: 13px;
       line-height: 1;
       cursor: pointer;
+      flex-shrink: 0;
     }
     .chip-del:hover {
       color: #dc2626;
       background: transparent;
     }
-    .tier-add-row {
+    .subtier-add-box {
+      padding: 7px;
+      border-top: 1px solid #f1f5f9;
+      background: #f8fafc;
       display: flex;
-      gap: 6px;
+      gap: 4px;
     }
-    .tier-add-input {
+    .subtier-add-input {
       flex: 1;
       min-width: 0;
-      padding: 5px 8px;
-      font-size: 13px;
+      padding: 4px 6px;
+      font-size: 12px;
     }
-    .tier-add-btn {
-      padding: 5px 10px;
+    .subtier-add-btn {
+      padding: 4px 8px;
       font-size: 12px;
       white-space: nowrap;
     }
@@ -890,10 +927,10 @@ HTML_PAGE = """<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[티어표] 한 줄 4개 보기 · 티어별 인원 추가/삭제 시 실시간 반영`;
+          `[티어표] 세로 열 시트 스타일 · 세부 등급별 인원 추가/삭제 시 실시간 반영`;
         leftEl.innerHTML = `
           <strong>전체 등록 인원</strong>
-          <span class="info-text">${totalCount}명 (${state.tiers.length}개 세부 티어)</span>
+          <span class="info-text">${totalCount}명</span>
         `;
         resetBtn.textContent = "기본 티어표 복원";
       } else {
@@ -952,64 +989,89 @@ HTML_PAGE = """<!DOCTYPE html>
       const container = document.getElementById("mainContent");
       container.innerHTML = "";
 
-      const grid = document.createElement("div");
-      grid.className = "tier-grid";
+      const wrap = document.createElement("div");
+      wrap.className = "tier-groups-wrap";
 
-      state.tiers.forEach((tier, tIdx) => {
-        const players = board[tier] || [];
-        const box = document.createElement("div");
-        box.className = "tier-box";
+      const groups = state.tier_groups || [];
+      groups.forEach((grp, gIdx) => {
+        const subTiers = grp.tiers || [];
+        const groupTotal = subTiers.reduce((sum, t) => sum + ((board[t] && board[t].length) || 0), 0);
 
-        const header = document.createElement("div");
-        header.className = "tier-box-header";
-        header.innerHTML = `
-          <span class="tier-name-badge">${escapeHtml(tier)}</span>
-          <span class="tier-count">${players.length}명</span>
+        const groupCard = document.createElement("div");
+        groupCard.className = "tier-group-card";
+
+        const banner = document.createElement("div");
+        banner.className = "tier-group-banner";
+        banner.innerHTML = `
+          <span>${escapeHtml(grp.group)}</span>
+          <span class="tier-group-count">총 ${groupTotal}명</span>
         `;
-        box.appendChild(header);
+        groupCard.appendChild(banner);
 
-        const membersWrap = document.createElement("div");
-        membersWrap.className = "tier-members";
-        if (players.length === 0) {
-          membersWrap.innerHTML = `<span class="info-text">등록된 인원 없음</span>`;
-        } else {
-          players.forEach(name => {
-            const chip = document.createElement("span");
-            chip.className = "member-chip";
-            chip.innerHTML = `
-              <span>${escapeHtml(name)}</span>
-              <button type="button" class="chip-del" title="삭제">×</button>
-            `;
-            chip.querySelector(".chip-del").onclick = () => removePlayerFromTier(tier, name);
-            membersWrap.appendChild(chip);
-          });
-        }
-        box.appendChild(membersWrap);
+        const colsWrap = document.createElement("div");
+        colsWrap.className = "subtier-cols " + (subTiers.length >= 4 ? "cols-4" : "cols-1");
 
-        const inputKey = `tier-add-${tIdx}`;
-        const addRow = document.createElement("div");
-        addRow.className = "tier-add-row";
-        const inputVal = (focusSnap && focusSnap.fieldKey === inputKey) ? focusSnap.value : "";
-        addRow.innerHTML = `
-          <input type="text" class="tier-add-input" data-field-key="${inputKey}" placeholder="이름 입력 후 추가" value="${escapeHtml(inputVal)}" />
-          <button type="button" class="tier-add-btn">추가</button>
-        `;
+        subTiers.forEach((tier, sIdx) => {
+          const players = board[tier] || [];
+          const shortLabel = tier.startsWith(grp.group) && tier !== grp.group
+            ? tier.slice(grp.group.length).trim()
+            : tier;
 
-        const addInput = addRow.querySelector(".tier-add-input");
-        const addBtn = addRow.querySelector(".tier-add-btn");
-        addBtn.onclick = () => addPlayerToTier(tier, addInput);
-        addInput.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            addPlayerToTier(tier, addInput);
+          const col = document.createElement("div");
+          col.className = "subtier-col";
+
+          const colHeader = document.createElement("div");
+          colHeader.className = "subtier-col-header";
+          colHeader.textContent = `${shortLabel} (${players.length})`;
+          col.appendChild(colHeader);
+
+          const vList = document.createElement("div");
+          vList.className = "subtier-vertical-list";
+
+          if (players.length === 0) {
+            vList.innerHTML = `<span class="info-text" style="text-align:center; padding-top:8px;">-</span>`;
+          } else {
+            players.forEach(name => {
+              const item = document.createElement("div");
+              item.className = "vertical-member-item";
+              item.innerHTML = `
+                <span class="vertical-member-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <button type="button" class="chip-del" title="삭제">×</button>
+              `;
+              item.querySelector(".chip-del").onclick = () => removePlayerFromTier(tier, name);
+              vList.appendChild(item);
+            });
           }
+          col.appendChild(vList);
+
+          const inputKey = `tier-add-${gIdx}-${sIdx}`;
+          const addBox = document.createElement("div");
+          addBox.className = "subtier-add-box";
+          const inputVal = (focusSnap && focusSnap.fieldKey === inputKey) ? focusSnap.value : "";
+          addBox.innerHTML = `
+            <input type="text" class="subtier-add-input" data-field-key="${inputKey}" placeholder="이름" value="${escapeHtml(inputVal)}" />
+            <button type="button" class="subtier-add-btn">+</button>
+          `;
+
+          const addInput = addBox.querySelector(".subtier-add-input");
+          const addBtn = addBox.querySelector(".subtier-add-btn");
+          addBtn.onclick = () => addPlayerToTier(tier, addInput);
+          addInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addPlayerToTier(tier, addInput);
+            }
+          });
+
+          col.appendChild(addBox);
+          colsWrap.appendChild(col);
         });
 
-        box.appendChild(addRow);
-        grid.appendChild(box);
+        groupCard.appendChild(colsWrap);
+        wrap.appendChild(groupCard);
       });
 
-      container.appendChild(grid);
+      container.appendChild(wrap);
 
       if (preserveFocus) {
         restoreFocusSnapshot(focusSnap);
