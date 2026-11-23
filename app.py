@@ -1796,6 +1796,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <script>
     const CLIENT_STORAGE_KEY = "pubg_kill_match_client_id";
+    const NICK_STORAGE_KEY = "pubg_kill_match_nickname";
     const TOKEN_STORAGE_KEY = "pubg_kill_match_edit_token";
     const HEADER_TONES = ["tone-pink", "tone-yellow", "tone-blue"];
     const CHANNEL_LABELS = {
@@ -1805,11 +1806,33 @@ HTML_PAGE = r"""<!DOCTYPE html>
       mefun_ck: "메펀ck방"
     };
 
-    const clientId = localStorage.getItem(CLIENT_STORAGE_KEY) || (() => {
-      const id = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
-      localStorage.setItem(CLIENT_STORAGE_KEY, id);
-      return id;
-    })();
+    function getOrCreateClientId() {
+      try {
+        const existing = localStorage.getItem(CLIENT_STORAGE_KEY);
+        if (existing && existing.trim()) return existing.trim();
+        const id = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
+        localStorage.setItem(CLIENT_STORAGE_KEY, id);
+        return id;
+      } catch (e) {
+        return "temp_" + Date.now().toString(36);
+      }
+    }
+
+    function getSavedNickname() {
+      try {
+        return (localStorage.getItem(NICK_STORAGE_KEY) || "").trim();
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function setSavedNickname(nick) {
+      try {
+        if (nick) localStorage.setItem(NICK_STORAGE_KEY, nick);
+      } catch (e) {}
+    }
+
+    const clientId = getOrCreateClientId();
 
     let state = null;
     let currentChannel = "kill1";
@@ -1823,7 +1846,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let canEdit = false;
     let isAdminUser = false;
     let currentUser = null;
-    let editToken = localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+    let editToken = (() => {
+      try { return localStorage.getItem(TOKEN_STORAGE_KEY) || ""; } catch (e) { return ""; }
+    })();
     let adminCache = { users: [], room_active_map: {} };
     let presenceTimer = null;
 
@@ -1922,7 +1947,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const errEl = document.getElementById("nickErrorMsg");
       closeBtn.style.display = allowClose ? "inline-block" : "none";
       errEl.textContent = "";
-      input.value = currentUser ? currentUser.nickname : "";
+      input.value = currentUser ? currentUser.nickname : getSavedNickname();
       modal.classList.add("open");
       setTimeout(() => input.focus(), 40);
     }
@@ -1952,11 +1977,32 @@ HTML_PAGE = r"""<!DOCTYPE html>
           return;
         }
         currentUser = data.user;
+        setSavedNickname(currentUser.nickname);
         document.getElementById("nicknameModal").classList.remove("open");
         await reloadChannelState(currentChannel, false);
       } catch (e) {
         errEl.textContent = "닉네임 등록 중 오류가 발생했습니다.";
       }
+    }
+
+    async function tryRestoreSavedNickname() {
+      const savedNick = getSavedNickname();
+      if (!savedNick) return false;
+      try {
+        const res = await fetch("/api/user/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ client_id: clientId, nickname: savedNick })
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        if (data && data.user && data.user.nickname) {
+          currentUser = data.user;
+          setSavedNickname(currentUser.nickname);
+          return true;
+        }
+      } catch (e) {}
+      return false;
     }
 
     async function unlockEditor() {
@@ -1978,7 +2024,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
         const data = await res.json();
         editToken = data.edit_token || "";
-        localStorage.setItem(TOKEN_STORAGE_KEY, editToken);
+        try { localStorage.setItem(TOKEN_STORAGE_KEY, editToken); } catch (e) {}
         await reloadChannelState(currentChannel, false);
       } catch (e) {
         alert("잠금 해제 요청 중 오류가 발생했습니다.");
@@ -1987,7 +2033,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     async function lockEditor() {
       editToken = "";
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch (e) {}
       await reloadChannelState(currentChannel, false);
     }
 
@@ -3643,6 +3689,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       state = nextState;
       localVersion = Math.max(localVersion, nextState.version || 1);
       currentUser = nextState.user || null;
+      if (currentUser && currentUser.nickname) {
+        setSavedNickname(currentUser.nickname);
+      }
       isAdminUser = Boolean(nextState.is_admin);
       canEdit = Boolean(nextState.can_edit);
 
@@ -3670,7 +3719,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
           if (saveTimer || isSaving || pendingSave) return;
 
           localVersion = msg.version;
-          currentUser = msg.user || currentUser;
+          if (msg.user) {
+            currentUser = msg.user;
+            if (currentUser.nickname) setSavedNickname(currentUser.nickname);
+          }
           isAdminUser = Boolean(msg.is_admin);
           canEdit = Boolean(msg.can_edit);
           if (state) {
@@ -3699,6 +3751,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       currentUser = state.user || null;
       isAdminUser = Boolean(state.is_admin);
       canEdit = Boolean(state.can_edit);
+
+      if (!currentUser && getSavedNickname()) {
+        const restored = await tryRestoreSavedNickname();
+        if (restored) {
+          await reloadChannelState(currentChannel, false);
+        }
+      } else if (currentUser && currentUser.nickname) {
+        setSavedNickname(currentUser.nickname);
+      }
 
       renderAuthBar();
       renderTabs();
