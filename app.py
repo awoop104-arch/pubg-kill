@@ -15,12 +15,13 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "tnals1004")
 STATE_FILE = Path("kill_match_state.json")
 
 RoomId = Literal["kill1", "kill2", "kill3", "mefun_ck"]
-RoleType = Literal["user", "bj"]
+RoleType = Literal["user", "bj", "admin"]
+GameMode = Literal["SOLO", "DUO", "SQUAD"]
 
 ROOM_META = {
-    "kill1": {"name": "킬내기 1번방", "desc": "메인 킬내기 매치 #1"},
-    "kill2": {"name": "킬내기 2번방", "desc": "서브 킬내기 매치 #2"},
-    "kill3": {"name": "킬내기 3번방", "desc": "서브 킬내기 매치 #3"},
+    "kill1": {"name": "킬내기 1번방", "desc": "킬내기 매치 #1"},
+    "kill2": {"name": "킬내기 2번방", "desc": "킬내기 매치 #2"},
+    "kill3": {"name": "킬내기 3번방", "desc": "킬내기 매치 #3"},
     "mefun_ck": {"name": "메펀ck방", "desc": "메펀 CK 전용 전광판"},
 }
 
@@ -32,12 +33,13 @@ def default_room_data(room_id: str) -> dict:
         "id": room_id,
         "name": ROOM_META[room_id]["name"],
         "desc": ROOM_META[room_id]["desc"],
+        "mode": "SQUAD",
         "target_kills": 50,
         "chickens": 0,
-        "active_bjs": [],  # 해당 방에서 수정 권한이 '활성화'된 BJ client_id 목록
+        "active_bjs": [],
         "rows": [
-            {"id": 1, "name": "1팀 / 플레이어A", "kills": 0, "rank_pts": 0, "deduct": 0},
-            {"id": 2, "name": "2팀 / 플레이어B", "kills": 0, "rank_pts": 0, "deduct": 0},
+            {"id": 1, "name": "1팀 / 플레이어A", "mode": "SQUAD", "kills": 0, "rank_pts": 0, "deduct": 0},
+            {"id": 2, "name": "2팀 / 플레이어B", "mode": "SQUAD", "kills": 0, "rank_pts": 0, "deduct": 0},
         ],
     }
 
@@ -46,17 +48,20 @@ def load_state() -> dict:
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            # 누락된 방 보정
             data.setdefault("users", {})
             data.setdefault("rooms", {})
             for rid in ROOM_META:
                 if rid not in data["rooms"]:
                     data["rooms"][rid] = default_room_data(rid)
+                else:
+                    data["rooms"][rid].setdefault("mode", "SQUAD")
+                    for row in data["rooms"][rid].get("rows", []):
+                        row.setdefault("mode", data["rooms"][rid].get("mode", "SQUAD"))
             return data
         except Exception:
             pass
     return {
-        "users": {},  # client_id -> {"nickname": str, "role": "user"|"bj"}
+        "users": {},  # client_id -> {"nickname": str, "role": "user"|"bj"|"admin"}
         "rooms": {rid: default_room_data(rid) for rid in ROOM_META},
     }
 
@@ -71,16 +76,43 @@ def save_state() -> None:
     )
 
 
-def verify_admin(authorization: str | None = Header(default=None)) -> None:
+def normalize_nickname(nickname: str) -> str:
+    return " ".join(nickname.strip().split()).lower()
+
+
+def is_nickname_taken(nickname: str, exclude_client_id: str | None = None) -> bool:
+    target = normalize_nickname(nickname)
+    for cid, info in state["users"].items():
+        if exclude_client_id and cid == exclude_client_id:
+            continue
+        if normalize_nickname(info.get("nickname", "")) == target:
+            return True
+    return False
+
+
+def has_admin_privilege(client_id: str | None, authorization: str | None) -> bool:
     token = (authorization or "").replace("Bearer ", "").strip()
-    if token not in admin_tokens:
-        raise HTTPException(status_code=403, detail="관리자 인증이 필요합니다.")
+    if token in admin_tokens:
+        return True
+    if client_id:
+        user = state["users"].get(client_id)
+        if user and user.get("role") == "admin":
+            return True
+    return False
+
+
+def verify_admin(
+    authorization: str | None = Header(default=None),
+    x_client_id: str | None = Header(default=None),
+) -> None:
+    if not has_admin_privilege(x_client_id, authorization):
+        raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다.")
 
 
 def check_room_edit_permission(room_id: str, client_id: str, authorization: str | None) -> str:
-    token = (authorization or "").replace("Bearer ", "").strip()
-    if token in admin_tokens:
-        return "관리자"
+    if has_admin_privilege(client_id, authorization):
+        user = state["users"].get(client_id)
+        return user["nickname"] if user else "관리자"
 
     user = state["users"].get(client_id)
     room = state["rooms"].get(room_id)
@@ -101,6 +133,7 @@ class RegisterReq(BaseModel):
 
 class AdminLoginReq(BaseModel):
     password: str
+    client_id: str | None = None
 
 
 class SetRoleReq(BaseModel):
@@ -115,12 +148,13 @@ class RoomBjToggleReq(BaseModel):
 
 
 class DisableAllReq(BaseModel):
-    room_id: RoomId | None = None  # None이면 모든 방 전체 비활성화
+    room_id: RoomId | None = None
 
 
 class ScoreRow(BaseModel):
     id: int
     name: str
+    mode: GameMode = "SQUAD"
     kills: int
     rank_pts: int
     deduct: int
@@ -128,6 +162,7 @@ class ScoreRow(BaseModel):
 
 class UpdateRoomReq(BaseModel):
     client_id: str
+    mode: GameMode = "SQUAD"
     target_kills: int
     chickens: int
     rows: list[ScoreRow]
@@ -138,9 +173,12 @@ class UpdateRoomReq(BaseModel):
 # -------------------------
 @app.post("/api/register")
 def register_user(req: RegisterReq):
-    nickname = req.nickname.strip()
+    nickname = " ".join(req.nickname.strip().split())
     if not nickname:
         raise HTTPException(status_code=400, detail="닉네임을 입력하세요.")
+
+    if is_nickname_taken(nickname, exclude_client_id=req.client_id):
+        raise HTTPException(status_code=400, detail="이미 사용 중인 닉네임입니다. 다른 닉네임을 입력하세요.")
 
     if req.client_id not in state["users"]:
         state["users"][req.client_id] = {
@@ -155,36 +193,46 @@ def register_user(req: RegisterReq):
 
 
 @app.get("/api/bootstrap")
-def bootstrap(client_id: str):
+def bootstrap(client_id: str, authorization: str | None = Header(default=None)):
     user = state["users"].get(client_id)
+    is_admin_user = has_admin_privilege(client_id, authorization)
     rooms_summary = []
     for rid, r in state["rooms"].items():
         total_kills = sum(max(0, int(row["kills"])) for row in r["rows"])
+        can_edit = is_admin_user or bool(
+            user and user["role"] == "bj" and client_id in r["active_bjs"]
+        )
         rooms_summary.append({
             "id": rid,
             "name": r["name"],
             "desc": r["desc"],
+            "mode": r.get("mode", "SQUAD"),
             "total_kills": total_kills,
             "target_kills": r["target_kills"],
             "chickens": r["chickens"],
-            "can_edit": bool(user and user["role"] == "bj" and client_id in r["active_bjs"]),
+            "can_edit": can_edit,
         })
     return {
         "ok": True,
         "user": user,
+        "is_admin": is_admin_user,
         "rooms": rooms_summary,
     }
 
 
 @app.get("/api/rooms/{room_id}")
-def get_room(room_id: RoomId, client_id: str):
+def get_room(room_id: RoomId, client_id: str, authorization: str | None = Header(default=None)):
     room = state["rooms"][room_id]
     user = state["users"].get(client_id)
-    can_edit = bool(user and user["role"] == "bj" and client_id in room["active_bjs"])
+    is_admin_user = has_admin_privilege(client_id, authorization)
+    can_edit = is_admin_user or bool(
+        user and user["role"] == "bj" and client_id in room["active_bjs"]
+    )
     return {
         "ok": True,
         "room": room,
         "can_edit": can_edit,
+        "is_admin": is_admin_user,
     }
 
 
@@ -196,6 +244,7 @@ def update_room(
 ):
     editor_name = check_room_edit_permission(room_id, req.client_id, authorization)
     room = state["rooms"][room_id]
+    room["mode"] = req.mode
     room["target_kills"] = max(1, int(req.target_kills))
     room["chickens"] = max(0, int(req.chickens))
     room["rows"] = [row.model_dump() for row in req.rows]
@@ -209,12 +258,23 @@ def admin_login(req: AdminLoginReq):
         raise HTTPException(status_code=401, detail="관리자 비밀번호가 일치하지 않습니다.")
     token = secrets.token_hex(16)
     admin_tokens.add(token)
+
+    if req.client_id and req.client_id in state["users"]:
+        state["users"][req.client_id]["role"] = "admin"
+        for r in state["rooms"].values():
+            if req.client_id in r["active_bjs"]:
+                r["active_bjs"].remove(req.client_id)
+        save_state()
+
     return {"ok": True, "token": token}
 
 
 @app.get("/api/admin/panel")
-def admin_panel(authorization: str | None = Header(default=None)):
-    verify_admin(authorization)
+def admin_panel(
+    authorization: str | None = Header(default=None),
+    x_client_id: str | None = Header(default=None),
+):
+    verify_admin(authorization, x_client_id)
     users_list = [
         {"client_id": cid, **u}
         for cid, u in state["users"].items()
@@ -231,15 +291,18 @@ def admin_panel(authorization: str | None = Header(default=None)):
 
 
 @app.post("/api/admin/role")
-def set_user_role(req: SetRoleReq, authorization: str | None = Header(default=None)):
-    verify_admin(authorization)
+def set_user_role(
+    req: SetRoleReq,
+    authorization: str | None = Header(default=None),
+    x_client_id: str | None = Header(default=None),
+):
+    verify_admin(authorization, x_client_id)
     user = state["users"].get(req.client_id)
     if not user:
         raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
 
     user["role"] = req.role
-    if req.role == "user":
-        # 일반유저로 내리면 모든 방의 활성 권한 즉시 회수
+    if req.role != "bj":
         for r in state["rooms"].values():
             if req.client_id in r["active_bjs"]:
                 r["active_bjs"].remove(req.client_id)
@@ -249,8 +312,12 @@ def set_user_role(req: SetRoleReq, authorization: str | None = Header(default=No
 
 
 @app.post("/api/admin/room-bj")
-def toggle_room_bj(req: RoomBjToggleReq, authorization: str | None = Header(default=None)):
-    verify_admin(authorization)
+def toggle_room_bj(
+    req: RoomBjToggleReq,
+    authorization: str | None = Header(default=None),
+    x_client_id: str | None = Header(default=None),
+):
+    verify_admin(authorization, x_client_id)
     user = state["users"].get(req.client_id)
     if not user:
         raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
@@ -268,8 +335,12 @@ def toggle_room_bj(req: RoomBjToggleReq, authorization: str | None = Header(defa
 
 
 @app.post("/api/admin/disable-all")
-def disable_all_bjs(req: DisableAllReq, authorization: str | None = Header(default=None)):
-    verify_admin(authorization)
+def disable_all_bjs(
+    req: DisableAllReq,
+    authorization: str | None = Header(default=None),
+    x_client_id: str | None = Header(default=None),
+):
+    verify_admin(authorization, x_client_id)
     if req.room_id:
         state["rooms"][req.room_id]["active_bjs"] = []
     else:
@@ -329,6 +400,7 @@ HTML_PAGE = """<!DOCTYPE html>
   .badge.bj { background: rgba(59,130,246,0.2); color: #60a5fa; border: 1px solid #3b82f6; }
   .badge.active { background: rgba(16,185,129,0.2); color: #34d399; border: 1px solid #10b981; }
   .badge.admin { background: rgba(245,158,11,0.2); color: #fbbf24; border: 1px solid #f59e0b; }
+  .badge.mode { background: rgba(148,163,184,0.18); color: #e2e8f0; border: 1px solid #475569; }
   button {
     cursor: pointer;
     border: 1px solid var(--border);
@@ -352,12 +424,11 @@ HTML_PAGE = """<!DOCTYPE html>
     padding: 6px 10px;
     font-size: 13px;
   }
-  .container { max-width: 1080px; margin: 28px auto; padding: 0 20px; }
+  .container { max-width: 1120px; margin: 28px auto; padding: 0 20px; }
 
-  /* Lobby Grid */
   .room-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: 16px;
     margin-top: 18px;
   }
@@ -373,7 +444,6 @@ HTML_PAGE = """<!DOCTYPE html>
   .room-title { font-size: 19px; font-weight: 800; margin-bottom: 6px; }
   .room-desc { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
 
-  /* Scoreboard */
   .board-card {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -400,9 +470,8 @@ HTML_PAGE = """<!DOCTYPE html>
   th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
   td.name-col { text-align: left; }
   td input[type="number"] { width: 76px; text-align: center; }
-  td input[type="text"] { width: 100%; max-width: 240px; }
+  td input[type="text"] { width: 100%; max-width: 220px; }
 
-  /* Scoreboard Bottom Right Chicken + Target Kill % */
   .board-footer {
     display: flex;
     flex-wrap: wrap;
@@ -454,7 +523,6 @@ HTML_PAGE = """<!DOCTYPE html>
     transition: width 0.25s ease;
   }
 
-  /* Modals */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -471,7 +539,7 @@ HTML_PAGE = """<!DOCTYPE html>
     border: 1px solid var(--border);
     border-radius: 14px;
     width: 100%;
-    max-width: 580px;
+    max-width: 600px;
     max-height: 88vh;
     overflow-y: auto;
     padding: 22px;
@@ -483,6 +551,13 @@ HTML_PAGE = """<!DOCTYPE html>
     gap: 10px;
     padding: 10px 0;
     border-bottom: 1px solid var(--border);
+  }
+  .error-text {
+    color: #f87171;
+    font-size: 12px;
+    margin-top: -8px;
+    margin-bottom: 12px;
+    min-height: 16px;
   }
 </style>
 </head>
@@ -502,26 +577,33 @@ HTML_PAGE = """<!DOCTYPE html>
 </header>
 
 <div class="container">
-  <!-- 4개 채널 로비 -->
   <section id="lobbySection">
     <h2 style="margin:0 0 6px 0;">입장할 채널을 선택하세요</h2>
     <p style="margin:0; color:var(--muted); font-size:14px;">일반유저는 조회만 가능하며, 관리자가 지정한 방의 활성화된 비제이만 점수를 수정할 수 있습니다.</p>
     <div id="roomGrid" class="room-grid"></div>
   </section>
 
-  <!-- 방 전광판 화면 -->
   <section id="roomSection" style="display:none;">
     <div class="board-card">
       <div class="board-top">
         <div>
-          <div style="display:flex; align-items:center; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <h2 id="roomTitle" style="margin:0;">방 제목</h2>
+            <span id="roomModeBadge" class="badge mode">SQUAD</span>
             <span id="roomEditBadge" class="badge">읽기 전용</span>
           </div>
           <div id="roomDesc" style="color:var(--muted); font-size:13px; margin-top:4px;"></div>
         </div>
 
         <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <label style="font-size:13px; color:var(--muted);">
+            모드:
+            <select id="roomModeSelect" onchange="changeRoomMode(this.value)">
+              <option value="SOLO">SOLO (솔로)</option>
+              <option value="DUO">DUO (듀오)</option>
+              <option value="SQUAD">SQUAD (스쿼드)</option>
+            </select>
+          </label>
           <label style="font-size:13px; color:var(--muted);">
             목표킬:
             <input id="targetKillsInput" type="number" min="1" value="50" style="width:82px;" oninput="recalcFooter()" />
@@ -538,19 +620,19 @@ HTML_PAGE = """<!DOCTYPE html>
       <table>
         <thead>
           <tr>
-            <th style="width:60px;">#</th>
+            <th style="width:56px;">#</th>
             <th style="text-align:left;">팀 / 닉네임</th>
-            <th style="width:110px;">킬 수</th>
-            <th style="width:110px;">순위 점수</th>
-            <th style="width:110px;">감점</th>
-            <th style="width:110px;">총점</th>
-            <th style="width:70px;">삭제</th>
+            <th style="width:110px;">모드</th>
+            <th style="width:105px;">킬 수</th>
+            <th style="width:105px;">순위 점수</th>
+            <th style="width:105px;">감점</th>
+            <th style="width:105px;">총점</th>
+            <th style="width:68px;">삭제</th>
           </tr>
         </thead>
         <tbody id="scoreBody"></tbody>
       </table>
 
-      <!-- 전광판 하단: 우측 하단 치킨 옆 목표킬 대비 달성률(%) -->
       <div class="board-footer">
         <div style="font-size:13px; color:var(--muted);">
           * 수정 권한이 있는 비제이 또는 관리자만 값을 변경하고 저장할 수 있습니다.
@@ -577,15 +659,16 @@ HTML_PAGE = """<!DOCTYPE html>
   </section>
 </div>
 
-<!-- 초기 닉네임 설정 모달 -->
+<!-- 닉네임 설정/변경 모달 -->
 <div id="nicknameModal" class="modal-backdrop">
   <div class="modal" style="max-width:400px;">
     <h3 style="margin-top:0;">닉네임 설정</h3>
-    <p style="font-size:13px; color:var(--muted);">접속 시 사용할 닉네임을 입력하세요. 초기 역할은 일반유저로 등록됩니다.</p>
-    <input id="nicknameInput" type="text" placeholder="닉네임 입력" style="width:100%; margin-bottom:14px;" onkeydown="if(event.key==='Enter') submitNickname()" />
+    <p style="font-size:13px; color:var(--muted);">중복되지 않는 닉네임을 입력하세요. 초기 역할은 일반유저로 등록됩니다.</p>
+    <input id="nicknameInput" type="text" placeholder="닉네임 입력" style="width:100%; margin-bottom:14px;" oninput="document.getElementById('nickErrorMsg').textContent=''" onkeydown="if(event.key==='Enter') submitNickname()" />
+    <div id="nickErrorMsg" class="error-text"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px;">
       <button id="cancelNickBtn" onclick="closeNicknameModal()" style="display:none;">취소</button>
-      <button class="primary" onclick="submitNickname()">입장하기</button>
+      <button class="primary" onclick="submitNickname()">확인</button>
     </div>
   </div>
 </div>
@@ -598,8 +681,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <button onclick="closePermissionModal()">닫기</button>
     </div>
 
-    <!-- 방 선택 및 동시 비활성화 컨트롤 -->
-    <div style="background:var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:16px;">
+    <div style="background:var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:12px;">
       <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px;">
         <div>
           <label style="font-size:13px; font-weight:700;">대상 방 선택: </label>
@@ -616,8 +698,26 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
       <div style="font-size:12px; color:var(--muted); margin-top:8px;">
-        * 역할을 <strong>비제이</strong>로 지정한 사용자만 선택한 방에서 개별 활성화/비활성화할 수 있습니다.
+        * <strong>관리자</strong> 역할을 부여하면 비밀번호 로그인 없이도 즉시 권한 설정 및 모든 방 수정이 가능합니다.
       </div>
+    </div>
+
+    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px;">
+      <input
+        id="adminSearchInput"
+        type="text"
+        placeholder="닉네임 검색..."
+        style="flex:1; min-width:160px;"
+        oninput="renderAdminPanel()"
+      />
+      <select id="adminRoleFilter" onchange="renderAdminPanel()">
+        <option value="all">전체 보기</option>
+        <option value="admin">관리자만</option>
+        <option value="bj">비제이만</option>
+        <option value="user">일반유저만</option>
+        <option value="active_in_room">선택방 활성만</option>
+      </select>
+      <button onclick="resetAdminFilters()" style="padding:6px 10px; font-size:12px;">초기화</button>
     </div>
 
     <div id="adminUserList"></div>
@@ -640,6 +740,7 @@ const clientId = localStorage.getItem("pubg_client_id") || (() => {
 
 let adminToken = sessionStorage.getItem("pubg_admin_token") || "";
 let currentUser = null;
+let serverAdminFlag = false;
 let currentRoomId = null;
 let currentRoomData = null;
 let canEditCurrentRoom = false;
@@ -647,7 +748,14 @@ let adminCache = { users: [], room_active_map: {} };
 let pollTimer = null;
 
 function isAdmin() {
-  return Boolean(adminToken);
+  return Boolean(adminToken) || serverAdminFlag || (currentUser && currentUser.role === "admin");
+}
+
+function getAuthHeaders(includeJson = false) {
+  const headers = { "X-Client-Id": clientId };
+  if (includeJson) headers["Content-Type"] = "application/json";
+  if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
+  return headers;
 }
 
 function syncHeader() {
@@ -672,9 +780,12 @@ function syncHeader() {
 }
 
 async function init() {
-  const res = await fetch(`/api/bootstrap?client_id=${encodeURIComponent(clientId)}`);
+  const res = await fetch(`/api/bootstrap?client_id=${encodeURIComponent(clientId)}`, {
+    headers: getAuthHeaders(false),
+  });
   const data = await res.json();
   currentUser = data.user;
+  serverAdminFlag = Boolean(data.is_admin);
   syncHeader();
 
   if (!currentUser) {
@@ -683,7 +794,6 @@ async function init() {
     renderLobby(data.rooms);
   }
 
-  // 3초마다 상태/권한 자동 동기화
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(refreshCurrentView, 3000);
 }
@@ -691,21 +801,24 @@ async function init() {
 async function refreshCurrentView() {
   if (!currentUser) return;
   if (!currentRoomId) {
-    const res = await fetch(`/api/bootstrap?client_id=${encodeURIComponent(clientId)}`);
+    const res = await fetch(`/api/bootstrap?client_id=${encodeURIComponent(clientId)}`, {
+      headers: getAuthHeaders(false),
+    });
     const data = await res.json();
     currentUser = data.user;
+    serverAdminFlag = Boolean(data.is_admin);
     syncHeader();
     renderLobby(data.rooms);
   } else {
-    // 수정 중인 입력 포커스가 없을 때만 자동 갱신
     const activeTag = document.activeElement?.tagName;
-    if (activeTag === "INPUT") return;
+    if (activeTag === "INPUT" || activeTag === "SELECT") return;
     await loadRoom(currentRoomId, true);
   }
 }
 
 function openNicknameModal(allowCancel) {
   document.getElementById("cancelNickBtn").style.display = allowCancel ? "inline-block" : "none";
+  document.getElementById("nickErrorMsg").textContent = "";
   document.getElementById("nicknameInput").value = currentUser ? currentUser.nickname : "";
   document.getElementById("nicknameModal").classList.add("open");
   setTimeout(() => document.getElementById("nicknameInput").focus(), 50);
@@ -717,7 +830,11 @@ function closeNicknameModal() {
 
 async function submitNickname() {
   const nickname = document.getElementById("nicknameInput").value.trim();
-  if (!nickname) return alert("닉네임을 입력하세요.");
+  const errEl = document.getElementById("nickErrorMsg");
+  if (!nickname) {
+    errEl.textContent = "닉네임을 입력하세요.";
+    return;
+  }
 
   const res = await fetch("/api/register", {
     method: "POST",
@@ -725,7 +842,10 @@ async function submitNickname() {
     body: JSON.stringify({ client_id: clientId, nickname }),
   });
   const data = await res.json();
-  if (!res.ok) return alert(data.detail || "등록 실패");
+  if (!res.ok) {
+    errEl.textContent = data.detail || "이미 사용 중인 닉네임입니다.";
+    return;
+  }
 
   currentUser = data.user;
   closeNicknameModal();
@@ -751,6 +871,7 @@ function renderLobby(rooms) {
           <span class="room-title">${r.name}</span>
           ${permTag}
         </div>
+        <div style="margin-bottom:8px;"><span class="badge mode">${r.mode || "SQUAD"}</span></div>
         <div class="room-desc">${r.desc}</div>
         <div style="font-size:13px; color:#cbd5e1; display:flex; justify-content:space-between;">
           <span>킬: <strong>${r.total_kills}</strong> / ${r.target_kills} (${pct}%)</span>
@@ -775,18 +896,24 @@ async function enterRoom(roomId) {
 }
 
 async function loadRoom(roomId, isSilent) {
-  const res = await fetch(`/api/rooms/${roomId}?client_id=${encodeURIComponent(clientId)}`);
+  const res = await fetch(`/api/rooms/${roomId}?client_id=${encodeURIComponent(clientId)}`, {
+    headers: getAuthHeaders(false),
+  });
   const data = await res.json();
   if (!res.ok) return;
 
   currentRoomData = data.room;
+  serverAdminFlag = Boolean(data.is_admin);
   canEditCurrentRoom = isAdmin() || data.can_edit;
+  syncHeader();
   renderRoomBoard();
 }
 
 function renderRoomBoard() {
   const r = currentRoomData;
+  const roomMode = r.mode || "SQUAD";
   document.getElementById("roomTitle").textContent = r.name;
+  document.getElementById("roomModeBadge").textContent = roomMode;
   document.getElementById("roomDesc").textContent = r.desc;
 
   const badge = document.getElementById("roomEditBadge");
@@ -798,10 +925,13 @@ function renderRoomBoard() {
     badge.className = "badge";
   }
 
+  const modeSelect = document.getElementById("roomModeSelect");
   const targetInput = document.getElementById("targetKillsInput");
   const chickenInput = document.getElementById("chickensInput");
+  modeSelect.value = roomMode;
   targetInput.value = r.target_kills;
   chickenInput.value = r.chickens;
+  modeSelect.disabled = !canEditCurrentRoom;
   targetInput.disabled = !canEditCurrentRoom;
   chickenInput.disabled = !canEditCurrentRoom;
   document.getElementById("addRowBtn").style.display = canEditCurrentRoom ? "inline-block" : "none";
@@ -809,12 +939,14 @@ function renderRoomBoard() {
 
   const tbody = document.getElementById("scoreBody");
   tbody.innerHTML = r.rows.map((row, idx) => {
+    const rowMode = row.mode || roomMode;
     const total = (Number(row.kills) || 0) + (Number(row.rank_pts) || 0) - (Number(row.deduct) || 0);
     if (!canEditCurrentRoom) {
       return `
         <tr>
           <td>${idx + 1}</td>
           <td class="name-col"><strong>${escapeHtml(row.name)}</strong></td>
+          <td><span class="badge mode">${rowMode}</span></td>
           <td>${row.kills}</td>
           <td>${row.rank_pts}</td>
           <td>${row.deduct}</td>
@@ -827,6 +959,13 @@ function renderRoomBoard() {
       <tr>
         <td>${idx + 1}</td>
         <td class="name-col"><input type="text" value="${escapeHtml(row.name)}" onchange="updateLocalRow(${idx}, 'name', this.value)" /></td>
+        <td>
+          <select onchange="updateLocalRow(${idx}, 'mode', this.value)">
+            <option value="SOLO" ${rowMode === "SOLO" ? "selected" : ""}>SOLO</option>
+            <option value="DUO" ${rowMode === "DUO" ? "selected" : ""}>DUO</option>
+            <option value="SQUAD" ${rowMode === "SQUAD" ? "selected" : ""}>SQUAD</option>
+          </select>
+        </td>
         <td><input type="number" min="0" value="${row.kills}" oninput="updateLocalRow(${idx}, 'kills', this.value)" /></td>
         <td><input type="number" value="${row.rank_pts}" oninput="updateLocalRow(${idx}, 'rank_pts', this.value)" /></td>
         <td><input type="number" min="0" value="${row.deduct}" oninput="updateLocalRow(${idx}, 'deduct', this.value)" /></td>
@@ -839,10 +978,16 @@ function renderRoomBoard() {
   recalcFooter();
 }
 
+function changeRoomMode(newMode) {
+  if (!canEditCurrentRoom || !currentRoomData) return;
+  currentRoomData.mode = newMode;
+  document.getElementById("roomModeBadge").textContent = newMode;
+}
+
 function updateLocalRow(idx, field, val) {
   if (!currentRoomData) return;
-  if (field === "name") {
-    currentRoomData.rows[idx].name = val;
+  if (field === "name" || field === "mode") {
+    currentRoomData.rows[idx][field] = val;
   } else {
     currentRoomData.rows[idx][field] = Number(val) || 0;
     const row = currentRoomData.rows[idx];
@@ -855,9 +1000,11 @@ function updateLocalRow(idx, field, val) {
 function addScoreRow() {
   if (!canEditCurrentRoom) return;
   const nextId = currentRoomData.rows.length + 1;
+  const currentMode = currentRoomData.mode || "SQUAD";
   currentRoomData.rows.push({
     id: Date.now(),
     name: `${nextId}팀 / 신규`,
+    mode: currentMode,
     kills: 0,
     rank_pts: 0,
     deduct: 0,
@@ -889,17 +1036,15 @@ async function saveRoomData() {
   if (!canEditCurrentRoom || !currentRoomId) return;
   const payload = {
     client_id: clientId,
+    mode: document.getElementById("roomModeSelect").value || "SQUAD",
     target_kills: Math.max(1, Number(document.getElementById("targetKillsInput").value) || 1),
     chickens: Math.max(0, Number(document.getElementById("chickensInput").value) || 0),
     rows: currentRoomData.rows,
   };
 
-  const headers = { "Content-Type": "application/json" };
-  if (isAdmin()) headers["Authorization"] = `Bearer ${adminToken}`;
-
   const res = await fetch(`/api/rooms/${currentRoomId}`, {
     method: "PUT",
-    headers,
+    headers: getAuthHeaders(true),
     body: JSON.stringify(payload),
   });
   const data = await res.json();
@@ -920,13 +1065,15 @@ async function openAdminLogin() {
   const res = await fetch("/api/admin/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password: pw }),
+    body: JSON.stringify({ password: pw, client_id: clientId }),
   });
   const data = await res.json();
   if (!res.ok) return alert(data.detail || "비밀번호 오류");
 
   adminToken = data.token;
   sessionStorage.setItem("pubg_admin_token", adminToken);
+  if (currentUser) currentUser.role = "admin";
+  serverAdminFlag = true;
   syncHeader();
   if (currentRoomId) await loadRoom(currentRoomId, false);
   await openPermissionModal();
@@ -945,16 +1092,23 @@ function closePermissionModal() {
   document.getElementById("permissionModal").classList.remove("open");
 }
 
+function resetAdminFilters() {
+  document.getElementById("adminSearchInput").value = "";
+  document.getElementById("adminRoleFilter").value = "all";
+  renderAdminPanel();
+}
+
 async function fetchAdminPanel() {
   const res = await fetch("/api/admin/panel", {
-    headers: { "Authorization": `Bearer ${adminToken}` },
+    headers: getAuthHeaders(false),
   });
   if (res.status === 403) {
     adminToken = "";
+    serverAdminFlag = false;
     sessionStorage.removeItem("pubg_admin_token");
     closePermissionModal();
     syncHeader();
-    return alert("관리자 세션이 만료되었습니다. 다시 로그인하세요.");
+    return alert("관리자 권한이 해제되었거나 세션이 만료되었습니다.");
   }
   adminCache = await res.json();
   renderAdminPanel();
@@ -962,6 +1116,8 @@ async function fetchAdminPanel() {
 
 function renderAdminPanel() {
   const selectedRoom = document.getElementById("adminRoomSelect").value;
+  const keyword = (document.getElementById("adminSearchInput")?.value || "").trim().toLowerCase();
+  const filterType = document.getElementById("adminRoleFilter")?.value || "all";
   const activeSet = new Set(adminCache.room_active_map[selectedRoom] || []);
   const listEl = document.getElementById("adminUserList");
 
@@ -970,23 +1126,49 @@ function renderAdminPanel() {
     return;
   }
 
-  listEl.innerHTML = adminCache.users.map(u => {
+  const filteredUsers = adminCache.users.filter(u => {
+    const matchesName = !keyword || String(u.nickname || "").toLowerCase().includes(keyword);
+    if (!matchesName) return false;
+
     const isBj = u.role === "bj";
+    const isAdminRole = u.role === "admin";
     const isActiveInRoom = isBj && activeSet.has(u.client_id);
 
-    // 어느 방들에 활성화되어 있는지 요약 표시
-    const activeRoomsText = isBj
-      ? Object.entries(ROOM_NAMES)
-          .filter(([rid]) => (adminCache.room_active_map[rid] || []).includes(u.client_id))
-          .map(([, rname]) => rname)
-          .join(", ") || "활성 방 없음"
-      : "일반유저 (권한 신청 불가)";
+    if (filterType === "admin") return isAdminRole;
+    if (filterType === "bj") return isBj;
+    if (filterType === "user") return u.role === "user";
+    if (filterType === "active_in_room") return isActiveInRoom;
+    return true;
+  });
 
-    const toggleControl = isBj
-      ? (isActiveInRoom
-          ? `<button class="danger" onclick="toggleBjRoom('${u.client_id}', false)">비활성화</button>`
-          : `<button class="success" onclick="toggleBjRoom('${u.client_id}', true)">활성화</button>`)
-      : `<span style="color:var(--muted); font-size:12px; min-width:74px; text-align:center;">-</span>`;
+  if (!filteredUsers.length) {
+    listEl.innerHTML = `<div style="color:var(--muted); text-align:center; padding:20px;">조건에 맞는 유저가 없습니다.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = filteredUsers.map(u => {
+    const isBj = u.role === "bj";
+    const isAdminRole = u.role === "admin";
+    const isActiveInRoom = isBj && activeSet.has(u.client_id);
+
+    let subText = "일반유저 (조회 전용)";
+    if (isAdminRole) {
+      subText = "관리자 (로그인 없이 전 방 수정 및 권한 설정 가능)";
+    } else if (isBj) {
+      subText = Object.entries(ROOM_NAMES)
+        .filter(([rid]) => (adminCache.room_active_map[rid] || []).includes(u.client_id))
+        .map(([, rname]) => rname)
+        .join(", ") || "활성 방 없음";
+    }
+
+    let toggleControl = `<span style="color:var(--muted); font-size:12px; min-width:74px; text-align:center;">-</span>`;
+    if (isAdminRole) {
+      toggleControl = `<span class="badge admin" style="min-width:74px; text-align:center;">전체 활성</span>`;
+    } else if (isBj) {
+      toggleControl = isActiveInRoom
+        ? `<button class="danger" onclick="toggleBjRoom('${u.client_id}', false)">비활성화</button>`
+        : `<button class="success" onclick="toggleBjRoom('${u.client_id}', true)">활성화</button>`;
+    }
 
     return `
       <div class="user-row">
@@ -995,12 +1177,13 @@ function renderAdminPanel() {
             ${escapeHtml(u.nickname)}
             ${u.client_id === clientId ? '<span class="badge" style="margin-left:4px;">나</span>' : ''}
           </div>
-          <div style="font-size:12px; color:var(--muted); margin-top:2px;">${activeRoomsText}</div>
+          <div style="font-size:12px; color:var(--muted); margin-top:2px;">${subText}</div>
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
           <select onchange="changeUserRole('${u.client_id}', this.value)">
             <option value="user" ${u.role === "user" ? "selected" : ""}>일반유저</option>
             <option value="bj" ${u.role === "bj" ? "selected" : ""}>비제이</option>
+            <option value="admin" ${u.role === "admin" ? "selected" : ""}>관리자</option>
           </select>
           ${toggleControl}
         </div>
@@ -1012,10 +1195,7 @@ function renderAdminPanel() {
 async function changeUserRole(targetClientId, role) {
   await fetch("/api/admin/role", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${adminToken}`,
-    },
+    headers: getAuthHeaders(true),
     body: JSON.stringify({ client_id: targetClientId, role }),
   });
   await fetchAdminPanel();
@@ -1026,10 +1206,7 @@ async function toggleBjRoom(targetClientId, active) {
   const roomId = document.getElementById("adminRoomSelect").value;
   await fetch("/api/admin/room-bj", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${adminToken}`,
-    },
+    headers: getAuthHeaders(true),
     body: JSON.stringify({ room_id: roomId, client_id: targetClientId, active }),
   });
   await fetchAdminPanel();
@@ -1040,10 +1217,7 @@ async function disableAllBjs(onlySelectedRoom) {
   const roomId = onlySelectedRoom ? document.getElementById("adminRoomSelect").value : null;
   await fetch("/api/admin/disable-all", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${adminToken}`,
-    },
+    headers: getAuthHeaders(true),
     body: JSON.stringify({ room_id: roomId }),
   });
   await fetchAdminPanel();
