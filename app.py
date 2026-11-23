@@ -1853,8 +1853,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
           </select>
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">이 방 비제이 전체 비활성화</button>
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 방 전체 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">이 채널 권한 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 방 권한 비활성화</button>
         </div>
       </div>
 
@@ -2627,7 +2627,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · 티어표] 세로 열 시트 스타일 · 세부 등급별 인원 추가/삭제 시 실시간 반영`;
+          `[${chLabel} · 티어표] 티어별 인원 추가/삭제 시 실시간 반영`;
         leftEl.innerHTML = `
           <strong>전체 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
@@ -2786,7 +2786,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · ${meta.label}] AI 밸런스 조절 제외 · 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
+          `[${chLabel} · ${meta.label}] 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
         leftEl.innerHTML = `
           <label for="teamCountInput"><strong>참가 팀 수</strong></label>
           <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
