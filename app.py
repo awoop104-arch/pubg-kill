@@ -24,7 +24,7 @@ CHANNELS = [
     ("kill1", "킬내기 1번방", "킬내기 매치 #1"),
     ("kill2", "킬내기 2번방", "킬내기 매치 #2"),
     ("kill3", "킬내기 3번방", "킬내기 매치 #3"),
-    ("mefun_ck", "메펀ck방", "메펀 CK 전용"),
+    ("mefun_ck", "메펀CK방", "메펀 CK 전용"),
 ]
 VALID_CHANNELS = {cid for cid, _, _ in CHANNELS}
 
@@ -1773,8 +1773,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
           </select>
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">이 방 비제이 전체 비활성화</button>
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 방 전체 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">해당 채널 권한 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 채널 권한 비활성화</button>
         </div>
       </div>
 
@@ -1785,7 +1785,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <option value="admin">관리자만</option>
           <option value="bj">비제이만</option>
           <option value="user">일반유저만</option>
-          <option value="active_in_room">선택방 활성만</option>
         </select>
         <button type="button" onclick="resetAdminFilters()">초기화</button>
       </div>
@@ -2209,7 +2208,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         backBtn.style.display = "none";
         tabsEl.style.display = "none";
         settingsCard.style.display = "none";
-        document.getElementById("modeInfo").textContent = "입장할 채널(킬내기 1~3번방, 메펀ck방)을 선택해 주세요.";
+        document.getElementById("modeInfo").textContent = "입장할 채널을 선택해 주세요.";
       } else {
         badge.textContent = CHANNEL_LABELS[currentChannel] || currentChannel;
         backBtn.style.display = "inline-block";
@@ -2550,7 +2549,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · 티어표] 세로 열 시트 스타일 · 세부 등급별 인원 추가/삭제 시 실시간 반영`;
+          `[${chLabel} · 티어표] 티별 인원 추가/삭제 시 실시간 반영`;
         leftEl.innerHTML = `
           <strong>전체 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
@@ -2629,7 +2628,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
         const viewWrap = document.getElementById("sbViewPills");
         [
-          { key: "table", label: "30라운드 입력표" },
+          { key: "table", label: "점수표" },
           { key: "board", label: "전광판 보기" }
         ].forEach(v => {
           const vBtn = document.createElement("button");
@@ -2709,7 +2708,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · ${meta.label}] AI 밸런스 조절 제외 · 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
+          `[${chLabel} · ${meta.label}] 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
         leftEl.innerHTML = `
           <label for="teamCountInput"><strong>참가 팀 수</strong></label>
           <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
