@@ -1620,6 +1620,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       min-width: 66px;
     }
 
+    /* 기본 전광판 (kill1~3) */
     .board-grid {
       display: flex;
       justify-content: center;
@@ -1645,9 +1646,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
       line-height: 1.25;
       word-break: keep-all;
     }
-    .match-board-header.tone-pink { background: #f8cedc; }
-    .match-board-header.tone-yellow { background: #f8e4a6; }
     .match-board-header.tone-blue { background: #b8d3f0; }
+    .match-board-header.tone-pink { background: #f8cedc; }
+    .match-board-header.tone-purple { background: #cbc0ea; }
+    .match-board-header.tone-orange { background: #f8d3a6; }
+    .match-board-header.tone-yellow { background: #f8e4a6; }
 
     .match-board-columns {
       display: grid;
@@ -1689,16 +1692,93 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .match-board-chicken-cell + .match-board-chicken-cell {
       border-left: 1px dashed #444444;
     }
-    .match-board-chicken-cell.tone-pink { background: #fce7ee; }
-    .match-board-chicken-cell.tone-yellow { background: #fdf3d2; }
     .match-board-chicken-cell.tone-blue { background: #e3effb; }
+    .match-board-chicken-cell.tone-pink { background: #fce7ee; }
+    .match-board-chicken-cell.tone-purple { background: #ebe5f9; }
+    .match-board-chicken-cell.tone-orange { background: #fdf0df; }
+    .match-board-chicken-cell.tone-yellow { background: #fdf3d2; }
 
     .match-board-footer {
       height: 11px;
     }
-    .match-board-footer.tone-pink { background: #fce7ee; }
-    .match-board-footer.tone-yellow { background: #fdf3d2; }
     .match-board-footer.tone-blue { background: #e3effb; }
+    .match-board-footer.tone-pink { background: #fce7ee; }
+    .match-board-footer.tone-purple { background: #ebe5f9; }
+    .match-board-footer.tone-orange { background: #fdf0df; }
+    .match-board-footer.tone-yellow { background: #fdf3d2; }
+
+    /* 메펀CK방(mefun_ck) 전용 각 팀별 카드 전광판 */
+    .mefun-board-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      max-width: 820px;
+      margin: 0 auto;
+    }
+    @media (max-width: 680px) {
+      .mefun-board-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .mefun-team-card {
+      background: #ffffff;
+      border: 1.5px solid #222222;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+    .mefun-team-header {
+      padding: 6px 8px;
+      border-bottom: 1.5px solid #222222;
+      text-align: center;
+      font-size: 14px;
+      font-weight: 800;
+      color: #111111;
+      letter-spacing: -0.3px;
+    }
+    .mefun-team-header.tone-blue { background: #b4d1f0; }
+    .mefun-team-header.tone-pink { background: #f7cad8; }
+    .mefun-team-header.tone-purple { background: #c5b8e8; }
+    .mefun-team-header.tone-orange { background: #f7cfa0; }
+
+    .mefun-members-box {
+      padding: 6px 8px;
+      background: #ffffff;
+      border-bottom: 1.5px solid #222222;
+    }
+    .mefun-member-line {
+      font-size: 13px;
+      font-weight: 800;
+      color: #111111;
+      line-height: 1.48;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .mefun-bottom-bar {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+    .mefun-bottom-cell {
+      padding: 5px 6px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 800;
+      color: #111111;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .mefun-bottom-cell + .mefun-bottom-cell {
+      border-left: 1.5px solid #222222;
+    }
+    .mefun-bottom-cell.tone-blue { background: #e3effb; }
+    .mefun-bottom-cell.tone-pink { background: #fce7ee; }
+    .mefun-bottom-cell.tone-purple { background: #ebe5f9; }
+    .mefun-bottom-cell.tone-orange { background: #fdf0df; }
+    .mefun-bottom-pct {
+      background: #d8dce2 !important;
+    }
   </style>
 </head>
 <body>
@@ -1769,12 +1849,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <option value="kill1">킬내기 1번방</option>
             <option value="kill2">킬내기 2번방</option>
             <option value="kill3">킬내기 3번방</option>
-            <option value="mefun_ck">메펀ck방</option>
+            <option value="mefun_ck">메펀CK방</option>
           </select>
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">해당 채널 권한 비활성화</button>
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 채널 권한 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">이 방 비제이 전체 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 방 전체 비활성화</button>
         </div>
       </div>
 
@@ -1797,12 +1877,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const CLIENT_STORAGE_KEY = "pubg_kill_match_client_id";
     const NICK_STORAGE_KEY = "pubg_kill_match_nickname";
     const TOKEN_STORAGE_KEY = "pubg_kill_match_edit_token";
-    const HEADER_TONES = ["tone-pink", "tone-yellow", "tone-blue"];
+    const HEADER_TONES = ["tone-blue", "tone-pink", "tone-purple", "tone-orange"];
     const CHANNEL_LABELS = {
       kill1: "킬내기 1번방",
       kill2: "킬내기 2번방",
       kill3: "킬내기 3번방",
-      mefun_ck: "메펀ck방"
+      mefun_ck: "메펀CK방"
     };
 
     function getOrCreateClientId() {
@@ -2080,12 +2160,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
         if (!matchesName) return false;
         const isBj = u.role === "bj";
         const isAdm = u.role === "admin";
-        const isActiveInCh = isBj && activeSet.has(u.client_id);
 
         if (flt === "admin") return isAdm;
         if (flt === "bj") return isBj;
         if (flt === "user") return u.role === "user";
-        if (flt === "active_in_room") return isActiveInCh;
         return true;
       });
 
@@ -2208,7 +2286,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         backBtn.style.display = "none";
         tabsEl.style.display = "none";
         settingsCard.style.display = "none";
-        document.getElementById("modeInfo").textContent = "입장할 채널을 선택해 주세요.";
+        document.getElementById("modeInfo").textContent = "입장할 채널(킬내기 1~3번방, 메펀CK방)을 선택해 주세요.";
       } else {
         badge.textContent = CHANNEL_LABELS[currentChannel] || currentChannel;
         backBtn.style.display = "inline-block";
@@ -2549,7 +2627,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · 티어표] 티별 인원 추가/삭제 시 실시간 반영`;
+          `[${chLabel} · 티어표] 세로 열 시트 스타일 · 세부 등급별 인원 추가/삭제 시 실시간 반영`;
         leftEl.innerHTML = `
           <strong>전체 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
@@ -2628,7 +2706,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
         const viewWrap = document.getElementById("sbViewPills");
         [
-          { key: "table", label: "점수표" },
+          { key: "table", label: "30라운드 입력표" },
           { key: "board", label: "전광판 보기" }
         ].forEach(v => {
           const vBtn = document.createElement("button");
@@ -2646,7 +2724,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             const val = parseInt(targetInput.value, 10);
             currentSb.target_score = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
             if (currentSb.view_style === "board") {
-              renderScoreboardBoardView(true);
+              renderScoreboard(true);
             }
             scheduleAutoSave();
           });
@@ -2657,7 +2735,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             currentSb.target_score = cleanVal;
             targetInput.value = String(cleanVal);
             if (currentSb.view_style === "board") {
-              renderScoreboardBoardView(true);
+              renderScoreboard(true);
             }
             scheduleAutoSave(50);
           });
@@ -2708,7 +2786,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · ${meta.label}] 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
+          `[${chLabel} · ${meta.label}] AI 밸런스 조절 제외 · 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
         leftEl.innerHTML = `
           <label for="teamCountInput"><strong>참가 팀 수</strong></label>
           <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
@@ -2888,16 +2966,83 @@ HTML_PAGE = r"""<!DOCTYPE html>
     function formatAchievementPct(score, target) {
       const safeTarget = target > 0 ? target : 300;
       const pct = (score / safeTarget) * 100;
-      const rounded = Math.round(pct * 10) / 10;
-      return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}%`;
+      const rounded = Math.round(pct * 100) / 100;
+      return `${rounded.toFixed(2)}%`;
     }
 
     function renderScoreboard(preserveFocus = false) {
       const sb = getScoreboardData();
       if (sb.view_style === "board") {
-        renderScoreboardBoardView(preserveFocus);
+        if (currentChannel === "mefun_ck") {
+          renderMefunCkBoardView(preserveFocus);
+        } else {
+          renderScoreboardBoardView(preserveFocus);
+        }
       } else {
         renderScoreboardTableView(preserveFocus);
+      }
+    }
+
+    function renderMefunCkBoardView(preserveFocus = false) {
+      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
+      const sb = getScoreboardData();
+      const activeMode = sb.active_team_mode;
+      const targetScore = sb.target_score || 300;
+      const tMeta = getTeamModeMeta(activeMode);
+      const mData = getModeData(activeMode);
+      const savedTeams = Array.isArray(mData.teams) ? mData.teams : [];
+      const configuredCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+      const teamCount = Math.max(configuredCount, savedTeams.length);
+      const maxRounds = state.max_rounds || 30;
+      const maxMembers = tMeta.max_members || 4;
+      const modeRoundsObj = sb.rounds_by_mode[activeMode];
+
+      const container = document.getElementById("mainContent");
+      container.innerHTML = "";
+
+      const grid = document.createElement("div");
+      grid.className = "mefun-board-grid";
+
+      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
+        const tSaved = savedTeams[tIdx] || {};
+        const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
+        const members = Array.isArray(tSaved.members) ? tSaved.members : [];
+        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
+        const toneClass = HEADER_TONES[tIdx % HEADER_TONES.length];
+        const pctText = formatAchievementPct(totals.totalNet, targetScore);
+
+        const memberLines = [];
+        for (let s = 0; s < maxMembers; s++) {
+          const m = members[s] || {};
+          const mName = (m.name || "").trim();
+          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, net: 0 };
+          const hasAnyActivity = mName || ms.kills !== 0 || ms.deductionTotal !== 0 || ms.net !== 0;
+          if (!hasAnyActivity && s > 0 && activeMode !== "solo") continue;
+
+          const displayName = mName || `${s + 1}번`;
+          const lineText = `${displayName} ${formatNumberDisplay(ms.net)} [${formatNumberDisplay(ms.kills)} -${formatNumberDisplay(ms.deductionTotal)}]`;
+          memberLines.push(`<div class="mefun-member-line" title="${escapeHtml(lineText)}">${escapeHtml(lineText)}</div>`);
+        }
+
+        const card = document.createElement("div");
+        card.className = "mefun-team-card";
+        card.innerHTML = `
+          <div class="mefun-team-header ${toneClass}">${escapeHtml(teamName)} ${formatNumberDisplay(totals.totalNet)} 점</div>
+          <div class="mefun-members-box">
+            ${memberLines.join("") || `<div class="mefun-member-line">-</div>`}
+          </div>
+          <div class="mefun-bottom-bar">
+            <div class="mefun-bottom-cell ${toneClass}">🍗 : ${formatNumberDisplay(totals.totalChickenPoints)}</div>
+            <div class="mefun-bottom-cell mefun-bottom-pct">${escapeHtml(pctText)}</div>
+          </div>
+        `;
+        grid.appendChild(card);
+      }
+
+      container.appendChild(grid);
+
+      if (preserveFocus && canEdit) {
+        restoreFocusSnapshot(focusSnap);
       }
     }
 
