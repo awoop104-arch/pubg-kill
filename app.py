@@ -15,12 +15,16 @@ TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
 STATE_VERSION = 1
+PRESENCE_TTL_SECONDS = 25.0
+
+# channel_id -> { client_id: last_seen_monotonic }
+CHANNEL_PRESENCE: dict[str, dict[str, float]] = {}
 
 CHANNELS = [
     ("kill1", "킬내기 1번방", "킬내기 매치 #1"),
     ("kill2", "킬내기 2번방", "킬내기 매치 #2"),
     ("kill3", "킬내기 3번방", "킬내기 매치 #3"),
-    ("mefun_ck", "메펀CK방", "메펀 CK 전용"),
+    ("mefun_ck", "메펀ck방", "메펀 CK 전용"),
 ]
 VALID_CHANNELS = {cid for cid, _, _ in CHANNELS}
 
@@ -163,6 +167,30 @@ INITIAL_PLAYER_TIER_MAP = {
 
 PENALTIES = [0] + [-n for n in range(1, 11)]
 HANDICAPS = list(range(0, 11))
+
+
+def touch_presence(channel_id: str, client_id: str | None, remove: bool = False):
+    cid = (client_id or "").strip()
+    if not cid or channel_id not in VALID_CHANNELS:
+        return
+    now = time.monotonic()
+    room_map = CHANNEL_PRESENCE.setdefault(channel_id, {})
+    expired = [k for k, ts in room_map.items() if now - ts > PRESENCE_TTL_SECONDS]
+    for k in expired:
+        room_map.pop(k, None)
+    if remove:
+        room_map.pop(cid, None)
+    else:
+        room_map[cid] = now
+
+
+def get_channel_viewer_count(channel_id: str) -> int:
+    now = time.monotonic()
+    room_map = CHANNEL_PRESENCE.get(channel_id, {})
+    expired = [k for k, ts in room_map.items() if now - ts > PRESENCE_TTL_SECONDS]
+    for k in expired:
+        room_map.pop(k, None)
+    return len(room_map)
 
 
 def issue_edit_token() -> str:
@@ -353,7 +381,7 @@ def default_channel_payload(raw_source: dict | None = None):
 
 def default_db():
     return {
-        "users": {},  # client_id -> {"nickname": str, "role": "user"|"bj"|"admin"}
+        "users": {},
         "channels": {
             cid: default_channel_payload()
             for cid, _, _ in CHANNELS
@@ -387,7 +415,6 @@ def load_db():
                     "role": role,
                 }
 
-    # 기존 단일 채널 포맷 마이그레이션
     if "channels" not in raw and ("modes" in raw or "teams" in raw or "team_count" in raw):
         legacy = {}
         if "modes" not in raw and ("teams" in raw or "team_count" in raw):
@@ -427,6 +454,12 @@ def save_db(data):
 class RegisterNicknamePayload(BaseModel):
     client_id: str
     nickname: str
+
+
+class PresenceHeartbeatPayload(BaseModel):
+    client_id: str
+    channel_id: str
+    active: bool = True
 
 
 class AuthUnlockPayload(BaseModel):
@@ -474,6 +507,16 @@ class ScoreboardPayload(BaseModel):
 
 
 app = FastAPI(title="PUBG 킬내기 관리 웹")
+
+
+@app.post("/api/presence")
+def presence_heartbeat(payload: PresenceHeartbeatPayload):
+    if payload.channel_id not in VALID_CHANNELS:
+        raise HTTPException(status_code=400, detail="올바르지 않은 채널입니다.")
+    with FILE_LOCK:
+        touch_presence(payload.channel_id, payload.client_id, remove=not payload.active)
+        counts = {cid: get_channel_viewer_count(cid) for cid, _, _ in CHANNELS}
+    return {"ok": True, "viewer_counts": counts}
 
 
 @app.post("/api/user/register")
@@ -584,7 +627,7 @@ def admin_toggle_room_bj(payload: AdminRoomBjPayload, request: Request):
         if not user:
             raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
         if user.get("role") != "bj":
-            raise HTTPException(status_code=400, detail="권한이 없습니다.")
+            raise HTTPException(status_code=400, detail="비제이 역할 사용자만 활성화할 수 있습니다.")
 
         active_list = db_obj["channels"][payload.channel_id].setdefault("active_bjs", [])
         if payload.active and target_cid not in active_list:
@@ -615,12 +658,19 @@ def admin_disable_all(payload: AdminDisableAllPayload, request: Request):
 
 
 @app.get("/api/state")
-def get_state(request: Request, channel: str = "kill1", client_id: str = ""):
+def get_state(request: Request, channel: str = "kill1", client_id: str = "", in_lobby: int = 0):
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     cid = (client_id or request.headers.get("X-Client-Id") or "").strip()
     token = request.headers.get("X-Edit-Token", "")
 
     with FILE_LOCK:
+        if cid:
+            if int(in_lobby or 0) == 1:
+                for c_id, _, _ in CHANNELS:
+                    touch_presence(c_id, cid, remove=True)
+            else:
+                touch_presence(ch_id, cid, remove=False)
+
         db_obj = load_db()
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
@@ -636,6 +686,7 @@ def get_state(request: Request, channel: str = "kill1", client_id: str = ""):
                 "label": c_label,
                 "desc": c_desc,
                 "can_edit": can_edit_channel(db_obj, c_id, cid, token),
+                "viewer_count": get_channel_viewer_count(c_id),
                 "active_bj_count": len(c_obj.get("active_bjs", [])),
             })
 
@@ -828,19 +879,31 @@ def reset_scoreboard(request: Request, channel: str = "kill1", client_id: str = 
 
 
 @app.get("/api/stream")
-async def stream_state(request: Request, channel: str = "kill1", client_id: str = ""):
+async def stream_state(request: Request, channel: str = "kill1", client_id: str = "", in_lobby: int = 0):
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     cid = (client_id or request.query_params.get("client_id") or "").strip()
     token = request.headers.get("X-Edit-Token") or request.query_params.get("edit_token") or ""
+    lobby_flag = int(in_lobby or 0) == 1
 
     async def event_generator():
         last_sent_version = -1
         last_ping = time.monotonic()
         while True:
             if await request.is_disconnected():
+                if cid:
+                    with FILE_LOCK:
+                        for c_id, _, _ in CHANNELS:
+                            touch_presence(c_id, cid, remove=True)
                 break
 
             with FILE_LOCK:
+                if cid:
+                    if lobby_flag:
+                        for c_id, _, _ in CHANNELS:
+                            touch_presence(c_id, cid, remove=True)
+                    else:
+                        touch_presence(ch_id, cid, remove=False)
+
                 current_version = STATE_VERSION
                 if current_version != last_sent_version:
                     db_obj = load_db()
@@ -1619,6 +1682,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       font-weight: 800;
       color: #111111;
       min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .match-board-chicken-cell + .match-board-chicken-cell {
       border-left: 1px dashed #444444;
@@ -1759,6 +1825,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let currentUser = null;
     let editToken = localStorage.getItem(TOKEN_STORAGE_KEY) || "";
     let adminCache = { users: [], room_active_map: {} };
+    let presenceTimer = null;
 
     function authHeaders(extra = {}) {
       const headers = {
@@ -1773,6 +1840,41 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function hasAdminAccess() {
       return Boolean(isAdminUser || (currentUser && currentUser.role === "admin") || editToken);
+    }
+
+    function sendPresenceHeartbeat(active = true) {
+      if (!clientId) return;
+      const targetActive = Boolean(active && !inLobby);
+      fetch("/api/presence", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: clientId,
+          channel_id: currentChannel,
+          active: targetActive
+        }),
+        keepalive: true
+      }).then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.viewer_counts && state && Array.isArray(state.channels_meta)) {
+          state.channels_meta.forEach(ch => {
+            if (Object.prototype.hasOwnProperty.call(data.viewer_counts, ch.id)) {
+              ch.viewer_count = data.viewer_counts[ch.id];
+            }
+          });
+          if (inLobby) {
+            renderLobby();
+          }
+        }
+      }).catch(() => {});
+    }
+
+    function startPresenceLoop() {
+      if (presenceTimer) clearInterval(presenceTimer);
+      presenceTimer = setInterval(() => {
+        sendPresenceHeartbeat(!inLobby);
+      }, 10000);
     }
 
     function renderAuthBar() {
@@ -1892,1720 +1994,3 @@ HTML_PAGE = r"""<!DOCTYPE html>
     async function openPermissionModal() {
       if (!hasAdminAccess()) return;
       const sel = document.getElementById("adminChannelSelect");
-      if (sel && CHANNEL_LABELS[currentChannel]) {
-        sel.value = currentChannel;
-      }
-      document.getElementById("permissionModal").classList.add("open");
-      await fetchAdminUsers();
-    }
-
-    function closePermissionModal() {
-      document.getElementById("permissionModal").classList.remove("open");
-    }
-
-    function resetAdminFilters() {
-      document.getElementById("adminSearchInput").value = "";
-      document.getElementById("adminRoleFilter").value = "all";
-      renderAdminUserList();
-    }
-
-    async function fetchAdminUsers() {
-      try {
-        const q = `/api/admin/users?client_id=${encodeURIComponent(clientId)}`;
-        const res = await fetch(q, { headers: authHeaders() });
-        if (!res.ok) return;
-        adminCache = await res.json();
-        renderAdminUserList();
-      } catch (e) {}
-    }
-
-    function renderAdminUserList() {
-      const chSel = document.getElementById("adminChannelSelect");
-      const targetCh = chSel ? chSel.value : currentChannel;
-      const kw = (document.getElementById("adminSearchInput")?.value || "").trim().toLowerCase();
-      const flt = document.getElementById("adminRoleFilter")?.value || "all";
-      const activeSet = new Set((adminCache.room_active_map && adminCache.room_active_map[targetCh]) || []);
-      const listEl = document.getElementById("adminUserList");
-      const users = Array.isArray(adminCache.users) ? adminCache.users : [];
-
-      const filtered = users.filter(u => {
-        const matchesName = !kw || String(u.nickname || "").toLowerCase().includes(kw);
-        if (!matchesName) return false;
-        const isBj = u.role === "bj";
-        const isAdm = u.role === "admin";
-        const isActiveInCh = isBj && activeSet.has(u.client_id);
-
-        if (flt === "admin") return isAdm;
-        if (flt === "bj") return isBj;
-        if (flt === "user") return u.role === "user";
-        if (flt === "active_in_room") return isActiveInCh;
-        return true;
-      });
-
-      if (filtered.length === 0) {
-        listEl.innerHTML = `<div class="info-text" style="text-align:center; padding:16px;">조건에 맞는 유저가 없습니다.</div>`;
-        return;
-      }
-
-      listEl.innerHTML = filtered.map(u => {
-        const isBj = u.role === "bj";
-        const isAdm = u.role === "admin";
-        const isActiveInCh = isBj && activeSet.has(u.client_id);
-
-        let descText = "일반유저 (보기 전용)";
-        if (isAdm) {
-          descText = "관리자 (로그인 없이 전 채널 수정 및 권한 설정 가능)";
-        } else if (isBj) {
-          const activeNames = Object.entries(CHANNEL_LABELS)
-            .filter(([cid]) => ((adminCache.room_active_map && adminCache.room_active_map[cid]) || []).includes(u.client_id))
-            .map(([, label]) => label);
-          descText = activeNames.length ? `활성 방: ${activeNames.join(", ")}` : "활성 방 없음";
-        }
-
-        let actionHtml = `<span class="info-text" style="min-width:70px; text-align:center;">-</span>`;
-        if (isAdm) {
-          actionHtml = `<span class="lock-badge unlocked">전체 활성</span>`;
-        } else if (isBj) {
-          actionHtml = isActiveInCh
-            ? `<button type="button" class="danger-solid" onclick="toggleBjInChannel('${u.client_id}', false)">비활성화</button>`
-            : `<button type="button" class="success" onclick="toggleBjInChannel('${u.client_id}', true)">활성화</button>`;
-        }
-
-        return `
-          <div class="admin-user-row">
-            <div>
-              <div style="font-weight:800; font-size:14px;">
-                ${escapeHtml(u.nickname)}
-                ${u.client_id === clientId ? `<span class="channel-pill" style="margin-left:4px;">나</span>` : ""}
-              </div>
-              <div class="info-text">${escapeHtml(descText)}</div>
-            </div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <select onchange="changeUserRole('${u.client_id}', this.value)">
-                <option value="user" ${u.role === "user" ? "selected" : ""}>일반유저</option>
-                <option value="bj" ${u.role === "bj" ? "selected" : ""}>비제이</option>
-                <option value="admin" ${u.role === "admin" ? "selected" : ""}>관리자</option>
-              </select>
-              ${actionHtml}
-            </div>
-          </div>
-        `;
-      }).join("");
-    }
-
-    async function changeUserRole(targetClientId, role) {
-      const res = await fetch("/api/admin/role", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ client_id: targetClientId, role, actor_client_id: clientId })
-      });
-      if (res.ok) {
-        await fetchAdminUsers();
-        await reloadChannelState(currentChannel, true);
-      }
-    }
-
-    async function toggleBjInChannel(targetClientId, active) {
-      const chSel = document.getElementById("adminChannelSelect");
-      const targetCh = chSel ? chSel.value : currentChannel;
-      const res = await fetch("/api/admin/room-bj", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ channel_id: targetCh, client_id: targetClientId, active, actor_client_id: clientId })
-      });
-      if (res.ok) {
-        await fetchAdminUsers();
-        await reloadChannelState(currentChannel, true);
-      }
-    }
-
-    async function disableAllRoomBjs(onlySelectedChannel) {
-      const chSel = document.getElementById("adminChannelSelect");
-      const targetCh = onlySelectedChannel && chSel ? chSel.value : null;
-      const res = await fetch("/api/admin/disable-all", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ channel_id: targetCh, actor_client_id: clientId })
-      });
-      if (res.ok) {
-        await fetchAdminUsers();
-        await reloadChannelState(currentChannel, true);
-      }
-    }
-
-    function openLobbyView() {
-      inLobby = true;
-      syncShellVisibility();
-      renderLobby();
-    }
-
-    async function selectChannel(chId) {
-      inLobby = false;
-      currentChannel = chId;
-      syncShellVisibility();
-      await reloadChannelState(chId, false);
-      connectRealtimeStream();
-    }
-
-    function syncShellVisibility() {
-      const badge = document.getElementById("activeChannelBadge");
-      const backBtn = document.getElementById("backLobbyBtn");
-      const tabsEl = document.getElementById("modeTabs");
-      const settingsCard = document.getElementById("settingsCard");
-
-      if (inLobby) {
-        badge.textContent = "채널 선택";
-        backBtn.style.display = "none";
-        tabsEl.style.display = "none";
-        settingsCard.style.display = "none";
-        document.getElementById("modeInfo").textContent = "입장할 채널(킬내기 1~3번방, 메펀ck방)을 선택해 주세요.";
-      } else {
-        badge.textContent = CHANNEL_LABELS[currentChannel] || currentChannel;
-        backBtn.style.display = "inline-block";
-        tabsEl.style.display = "flex";
-        settingsCard.style.display = "block";
-      }
-    }
-
-    function renderLobby() {
-      const container = document.getElementById("mainContent");
-      const chList = (state && Array.isArray(state.channels_meta) && state.channels_meta.length)
-        ? state.channels_meta
-        : Object.entries(CHANNEL_LABELS).map(([id, label]) => ({
-            id,
-            label,
-            desc: "",
-            can_edit: hasAdminAccess(),
-            active_bj_count: 0
-          }));
-
-      container.innerHTML = `
-        <div class="card">
-          <h2 style="margin:0 0 4px 0; font-size:18px;">채널 선택</h2>
-          <div class="info-text">원하는 방을 선택하면 솔로·듀오·스쿼드, 티어표, 점수판·전광판으로 이동합니다.</div>
-          <div class="lobby-grid">
-            ${chList.map(ch => `
-              <div class="lobby-card" onclick="selectChannel('${ch.id}')">
-                <div class="lobby-card-top">
-                  <span class="lobby-card-title">${escapeHtml(ch.label)}</span>
-                  <span class="lock-badge ${ch.can_edit ? "unlocked" : "locked"}">${ch.can_edit ? "수정 가능" : "보기 전용"}</span>
-                </div>
-                <div class="lobby-card-desc">${escapeHtml(ch.desc || "")}</div>
-                <div class="info-text">활성 비제이: ${ch.active_bj_count || 0}명</div>
-              </div>
-            `).join("")}
-          </div>
-        </div>
-      `;
-    }
-
-    function getModeMeta(modeKey = currentMode) {
-      return state.modes_meta.find(m => m.key === modeKey) || { key: modeKey, label: modeKey, max_members: 4 };
-    }
-
-    function getTeamModeMeta(modeKey) {
-      return (state.team_modes_meta || []).find(m => m.key === modeKey) || { key: modeKey, label: modeKey, max_members: 4 };
-    }
-
-    function getModeData(modeKey = currentMode) {
-      if (!state.data.modes[modeKey]) {
-        state.data.modes[modeKey] = { team_count: 2, teams: [] };
-      }
-      return state.data.modes[modeKey];
-    }
-
-    function getScoreboardData() {
-      if (!state.data.scoreboard || typeof state.data.scoreboard !== "object") {
-        state.data.scoreboard = {
-          active_team_mode: "solo",
-          view_style: "table",
-          target_score: 300,
-          big_map_points: 8,
-          small_map_points: 5,
-          rounds_by_mode: { solo: {}, duo: {}, squad: {} }
-        };
-      }
-      if (!state.data.scoreboard.rounds_by_mode || typeof state.data.scoreboard.rounds_by_mode !== "object") {
-        state.data.scoreboard.rounds_by_mode = { solo: {}, duo: {}, squad: {} };
-      }
-      ["solo", "duo", "squad"].forEach(k => {
-        if (!state.data.scoreboard.rounds_by_mode[k] || typeof state.data.scoreboard.rounds_by_mode[k] !== "object") {
-          state.data.scoreboard.rounds_by_mode[k] = {};
-        }
-      });
-      if (!["solo", "duo", "squad"].includes(state.data.scoreboard.active_team_mode)) {
-        state.data.scoreboard.active_team_mode = "solo";
-      }
-      if (!["table", "board"].includes(state.data.scoreboard.view_style)) {
-        state.data.scoreboard.view_style = "table";
-      }
-      const parsedTarget = parseInt(state.data.scoreboard.target_score, 10);
-      state.data.scoreboard.target_score = Number.isNaN(parsedTarget)
-        ? 300
-        : Math.max(1, Math.min(999999, parsedTarget));
-
-      const parsedBig = parseInt(state.data.scoreboard.big_map_points, 10);
-      state.data.scoreboard.big_map_points = Number.isNaN(parsedBig)
-        ? 8
-        : Math.max(0, Math.min(999, parsedBig));
-
-      const parsedSmall = parseInt(state.data.scoreboard.small_map_points, 10);
-      state.data.scoreboard.small_map_points = Number.isNaN(parsedSmall)
-        ? 5
-        : Math.max(0, Math.min(999, parsedSmall));
-
-      return state.data.scoreboard;
-    }
-
-    function getTierBoard() {
-      if (!state.data.tier_board) {
-        state.data.tier_board = {};
-      }
-      state.tiers.forEach(t => {
-        if (!Array.isArray(state.data.tier_board[t])) {
-          state.data.tier_board[t] = [];
-        }
-      });
-      return state.data.tier_board;
-    }
-
-    function buildDynamicPlayerTierMap() {
-      const map = {};
-      const board = getTierBoard();
-      state.tiers.forEach(tier => {
-        const list = board[tier] || [];
-        list.forEach(rawName => {
-          const clean = (rawName || "").trim();
-          if (clean) {
-            map[clean] = tier;
-            map[clean.replace(/\\s+/g, "")] = tier;
-          }
-        });
-      });
-      return map;
-    }
-
-    function lookupAutoTier(rawName) {
-      const cleaned = (rawName || "").trim();
-      if (!cleaned) return "";
-      const map = buildDynamicPlayerTierMap();
-      if (Object.prototype.hasOwnProperty.call(map, cleaned)) {
-        return map[cleaned];
-      }
-      const noSpace = cleaned.replace(/\\s+/g, "");
-      if (Object.prototype.hasOwnProperty.call(map, noSpace)) {
-        return map[noSpace];
-      }
-      return "";
-    }
-
-    function collectCurrentTeamUI() {
-      const meta = getModeMeta(currentMode);
-      const countInput = document.getElementById("teamCountInput");
-      const countVal = countInput ? parseInt(countInput.value, 10) : 2;
-      const teamCount = Math.max(2, Math.min(10, Number.isNaN(countVal) ? 2 : countVal));
-      const cards = document.querySelectorAll(".team-card");
-      const teams = [];
-
-      cards.forEach((card, idx) => {
-        const nameEl = card.querySelector(".team-name-input");
-        const summaryEl = card.querySelector(".summary-text");
-        const memberRows = card.querySelectorAll(".member-row");
-        const members = [];
-
-        memberRows.forEach((row, sIdx) => {
-          if (sIdx >= meta.max_members) return;
-          const mName = row.querySelector(".member-name").value.trim();
-          const mTier = row.querySelector(".member-tier").value;
-          const mPenalty = parseInt(row.querySelector(".member-penalty").value, 10) || 0;
-          const mHandicap = parseInt(row.querySelector(".member-handicap").value, 10) || 0;
-          members.push({
-            slot: sIdx + 1,
-            name: mName,
-            tier: mTier,
-            penalty: mPenalty,
-            handicap: mHandicap
-          });
-        });
-
-        teams.push({
-          name: (nameEl.value || "").trim() || `TEAM ${idx + 1}`,
-          summary: summaryEl.textContent || "",
-          members
-        });
-      });
-
-      return { team_count: teamCount, teams, client_id: clientId };
-    }
-
-    function scheduleAutoSave(delay = 180) {
-      if (!canEdit) return;
-      document.getElementById("saveStatus").textContent = "자동 저장 중...";
-      if (saveTimer) clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => {
-        saveTimer = null;
-        flushAutoSave();
-      }, delay);
-    }
-
-    async function flushAutoSave() {
-      if (!canEdit) return;
-      if (isSaving) {
-        pendingSave = true;
-        return;
-      }
-      isSaving = true;
-
-      try {
-        const chParam = `channel=${encodeURIComponent(currentChannel)}`;
-        if (currentMode === "tiers") {
-          const payload = {
-            tier_board: getTierBoard(),
-            client_id: clientId
-          };
-          const res = await fetch(`/api/tier-board?${chParam}`, {
-            method: "PUT",
-            headers: authHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify(payload)
-          });
-          if (res.status === 403) {
-            await reloadChannelState(currentChannel, true);
-            return;
-          }
-          if (!res.ok) {
-            document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
-            return;
-          }
-          const result = await res.json();
-          localVersion = Math.max(localVersion, result.version || 0);
-          if (!saveTimer && !pendingSave) {
-            state.data = result.data;
-          }
-          document.getElementById("saveStatus").textContent = "실시간 저장 완료";
-        } else if (currentMode === "scoreboard") {
-          const sb = getScoreboardData();
-          const payload = {
-            active_team_mode: sb.active_team_mode,
-            view_style: sb.view_style,
-            target_score: sb.target_score,
-            big_map_points: sb.big_map_points,
-            small_map_points: sb.small_map_points,
-            rounds_by_mode: sb.rounds_by_mode,
-            client_id: clientId
-          };
-          const res = await fetch(`/api/scoreboard?${chParam}`, {
-            method: "PUT",
-            headers: authHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify(payload)
-          });
-          if (res.status === 403) {
-            await reloadChannelState(currentChannel, true);
-            return;
-          }
-          if (!res.ok) {
-            document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
-            return;
-          }
-          const result = await res.json();
-          localVersion = Math.max(localVersion, result.version || 0);
-          if (!saveTimer && !pendingSave) {
-            state.data.scoreboard.target_score = result.data.scoreboard.target_score;
-            state.data.scoreboard.big_map_points = result.data.scoreboard.big_map_points;
-            state.data.scoreboard.small_map_points = result.data.scoreboard.small_map_points;
-            state.data.scoreboard.active_team_mode = result.data.scoreboard.active_team_mode;
-            state.data.scoreboard.view_style = result.data.scoreboard.view_style;
-          }
-          document.getElementById("saveStatus").textContent = "실시간 저장 완료";
-        } else {
-          const modeToSave = currentMode;
-          const payload = collectCurrentTeamUI();
-          state.data.modes[modeToSave] = {
-            team_count: payload.team_count,
-            teams: payload.teams
-          };
-          const res = await fetch(`/api/modes/${modeToSave}?${chParam}`, {
-            method: "PUT",
-            headers: authHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify(payload)
-          });
-          if (res.status === 403) {
-            await reloadChannelState(currentChannel, true);
-            return;
-          }
-          if (!res.ok) {
-            document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
-            return;
-          }
-          const result = await res.json();
-          localVersion = Math.max(localVersion, result.version || 0);
-          if (!saveTimer && !pendingSave) {
-            state.data.modes[modeToSave] = result.data.modes[modeToSave];
-          }
-          document.getElementById("saveStatus").textContent = "실시간 저장 완료";
-        }
-      } catch (err) {
-        document.getElementById("saveStatus").textContent = "연결 불안정";
-      } finally {
-        isSaving = false;
-        if (pendingSave) {
-          pendingSave = false;
-          flushAutoSave();
-        }
-      }
-    }
-
-    function renderTabs() {
-      const container = document.getElementById("modeTabs");
-      container.innerHTML = "";
-      state.modes_meta.forEach(m => {
-        const btn = document.createElement("button");
-        btn.className = "tab-btn" + (m.key === currentMode ? " active" : "");
-        btn.textContent = m.label;
-        btn.onclick = () => switchMode(m.key);
-        container.appendChild(btn);
-      });
-    }
-
-    function getFocusSnapshot() {
-      const active = document.activeElement;
-      if (!active || !active.dataset || !active.dataset.fieldKey) return null;
-      return {
-        fieldKey: active.dataset.fieldKey,
-        value: active.value,
-        selectionStart: active.selectionStart,
-        selectionEnd: active.selectionEnd
-      };
-    }
-
-    function restoreFocusSnapshot(snap) {
-      if (!snap) return;
-      const target = document.querySelector(`[data-field-key="${snap.fieldKey}"]`);
-      if (!target || target.disabled) return;
-      target.focus();
-      if (typeof snap.selectionStart === "number" && typeof target.setSelectionRange === "function") {
-        try {
-          target.setSelectionRange(snap.selectionStart, snap.selectionEnd);
-        } catch (e) {}
-      }
-    }
-
-    function renderSettingsBar() {
-      const leftEl = document.getElementById("modeSettingsLeft");
-      const resetBtn = document.getElementById("resetBtn");
-      resetBtn.disabled = !canEdit;
-      const chLabel = CHANNEL_LABELS[currentChannel] || currentChannel;
-
-      if (currentMode === "tiers") {
-        const board = getTierBoard();
-        const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
-        document.getElementById("modeInfo").textContent =
-          `[${chLabel} · 티어표] 세로 열 시트 스타일 · 세부 등급별 인원 추가/삭제 시 실시간 반영`;
-        leftEl.innerHTML = `
-          <strong>전체 등록 인원</strong>
-          <span class="info-text">${totalCount}명</span>
-        `;
-        resetBtn.textContent = "기본 티어표 복원";
-      } else if (currentMode === "scoreboard") {
-        const sb = getScoreboardData();
-        const activeMode = sb.active_team_mode;
-        const viewStyle = sb.view_style;
-        const targetScore = sb.target_score;
-        const bigPts = sb.big_map_points;
-        const smallPts = sb.small_map_points;
-        const tMeta = getTeamModeMeta(activeMode);
-        const mData = getModeData(activeMode);
-        const tCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
-
-        document.getElementById("modeInfo").textContent =
-          `[${chLabel} · 점수판 · ${tMeta.label}] 목표 ${targetScore}점 · 큰맵 +${bigPts} / 작은맵 +${smallPts}`;
-        leftEl.innerHTML = `
-          <strong>모드</strong>
-          <div class="submode-pills" id="sbModePills"></div>
-          <strong>보기 전환</strong>
-          <div class="submode-pills" id="sbViewPills"></div>
-          <label class="target-inline" for="targetScoreInput">
-            <span>목표</span>
-            <input
-              type="number"
-              id="targetScoreInput"
-              class="target-input"
-              data-field-key="sb-target-score"
-              min="1"
-              max="999999"
-              value="${escapeHtml(targetScore)}"
-              ${canEdit ? "" : "disabled"}
-            />
-          </label>
-          <label class="target-inline" for="bigMapPtsInput">
-            <span>큰맵점수</span>
-            <input
-              type="number"
-              id="bigMapPtsInput"
-              class="pts-input"
-              data-field-key="sb-big-pts"
-              min="0"
-              max="999"
-              value="${escapeHtml(bigPts)}"
-              ${canEdit ? "" : "disabled"}
-            />
-          </label>
-          <label class="target-inline" for="smallMapPtsInput">
-            <span>작은맵점수</span>
-            <input
-              type="number"
-              id="smallMapPtsInput"
-              class="pts-input"
-              data-field-key="sb-small-pts"
-              min="0"
-              max="999"
-              value="${escapeHtml(smallPts)}"
-              ${canEdit ? "" : "disabled"}
-            />
-          </label>
-          <span class="info-text">${tCount}팀 · 최대 30라운드</span>
-        `;
-        resetBtn.textContent = "점수판 초기화";
-
-        const pillsWrap = document.getElementById("sbModePills");
-        (state.team_modes_meta || []).forEach(tm => {
-          const pBtn = document.createElement("button");
-          pBtn.type = "button";
-          pBtn.className = "pill-btn" + (tm.key === activeMode ? " active" : "");
-          pBtn.textContent = tm.label;
-          pBtn.onclick = () => switchScoreboardTeamMode(tm.key);
-          pillsWrap.appendChild(pBtn);
-        });
-
-        const viewWrap = document.getElementById("sbViewPills");
-        [
-          { key: "table", label: "30라운드 입력표" },
-          { key: "board", label: "전광판 보기" }
-        ].forEach(v => {
-          const vBtn = document.createElement("button");
-          vBtn.type = "button";
-          vBtn.className = "pill-btn" + (v.key === viewStyle ? " active" : "");
-          vBtn.textContent = v.label;
-          vBtn.onclick = () => switchScoreboardViewStyle(v.key);
-          viewWrap.appendChild(vBtn);
-        });
-
-        const targetInput = document.getElementById("targetScoreInput");
-        if (targetInput && canEdit) {
-          targetInput.addEventListener("input", () => {
-            const currentSb = getScoreboardData();
-            const val = parseInt(targetInput.value, 10);
-            currentSb.target_score = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
-            if (currentSb.view_style === "board") {
-              renderScoreboardBoardView(true);
-            }
-            scheduleAutoSave();
-          });
-          targetInput.addEventListener("change", () => {
-            const currentSb = getScoreboardData();
-            const val = parseInt(targetInput.value, 10);
-            const cleanVal = Number.isNaN(val) ? 300 : Math.max(1, Math.min(999999, val));
-            currentSb.target_score = cleanVal;
-            targetInput.value = String(cleanVal);
-            if (currentSb.view_style === "board") {
-              renderScoreboardBoardView(true);
-            }
-            scheduleAutoSave(50);
-          });
-        }
-
-        const bigInput = document.getElementById("bigMapPtsInput");
-        if (bigInput && canEdit) {
-          bigInput.addEventListener("input", () => {
-            const currentSb = getScoreboardData();
-            const val = parseInt(bigInput.value, 10);
-            currentSb.big_map_points = Number.isNaN(val) ? 8 : Math.max(0, Math.min(999, val));
-            recomputeAllScoreboardTeamsLive();
-            scheduleAutoSave();
-          });
-          bigInput.addEventListener("change", () => {
-            const currentSb = getScoreboardData();
-            const val = parseInt(bigInput.value, 10);
-            const cleanVal = Number.isNaN(val) ? 8 : Math.max(0, Math.min(999, val));
-            currentSb.big_map_points = cleanVal;
-            bigInput.value = String(cleanVal);
-            recomputeAllScoreboardTeamsLive();
-            scheduleAutoSave(50);
-          });
-        }
-
-        const smallInput = document.getElementById("smallMapPtsInput");
-        if (smallInput && canEdit) {
-          smallInput.addEventListener("input", () => {
-            const currentSb = getScoreboardData();
-            const val = parseInt(smallInput.value, 10);
-            currentSb.small_map_points = Number.isNaN(val) ? 5 : Math.max(0, Math.min(999, val));
-            recomputeAllScoreboardTeamsLive();
-            scheduleAutoSave();
-          });
-          smallInput.addEventListener("change", () => {
-            const currentSb = getScoreboardData();
-            const val = parseInt(smallInput.value, 10);
-            const cleanVal = Number.isNaN(val) ? 5 : Math.max(0, Math.min(999, val));
-            currentSb.small_map_points = cleanVal;
-            smallInput.value = String(cleanVal);
-            recomputeAllScoreboardTeamsLive();
-            scheduleAutoSave(50);
-          });
-        }
-      } else {
-        const meta = getModeMeta(currentMode);
-        const modeData = getModeData(currentMode);
-        const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
-
-        document.getElementById("modeInfo").textContent =
-          `[${chLabel} · ${meta.label}] AI 밸런스 조절 제외 · 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
-        leftEl.innerHTML = `
-          <label for="teamCountInput"><strong>참가 팀 수</strong></label>
-          <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
-          <span class="info-text">${meta.label} 기준 · 팀당 최대 ${meta.max_members}명</span>
-        `;
-        resetBtn.textContent = "초기화";
-
-        const countInput = document.getElementById("teamCountInput");
-        if (countInput && canEdit) {
-          countInput.addEventListener("change", () => {
-            const current = collectCurrentTeamUI();
-            state.data.modes[currentMode] = {
-              team_count: current.team_count,
-              teams: current.teams
-            };
-            renderMainContent(false);
-            scheduleAutoSave(50);
-          });
-        }
-      }
-    }
-
-    async function switchScoreboardTeamMode(nextTeamMode) {
-      const sb = getScoreboardData();
-      if (sb.active_team_mode === nextTeamMode) return;
-      if (canEdit && saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        await flushAutoSave();
-      }
-      getScoreboardData().active_team_mode = nextTeamMode;
-      renderSettingsBar();
-      renderScoreboard(false);
-      if (canEdit) {
-        scheduleAutoSave(50);
-      }
-    }
-
-    async function switchScoreboardViewStyle(nextStyle) {
-      const sb = getScoreboardData();
-      if (sb.view_style === nextStyle) return;
-      if (canEdit && saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        await flushAutoSave();
-      }
-      getScoreboardData().view_style = nextStyle;
-      renderSettingsBar();
-      renderScoreboard(false);
-      if (canEdit) {
-        scheduleAutoSave(50);
-      }
-    }
-
-    function penaltyDeductionAmount(rawPenalty) {
-      const n = parseInt(rawPenalty, 10);
-      if (Number.isNaN(n)) return 0;
-      return Math.abs(n);
-    }
-
-    function getRoundEntry(modeRoundsObj, tIdx, roundNum, maxMembers) {
-      const tKey = `t${tIdx}`;
-      if (!modeRoundsObj[tKey] || typeof modeRoundsObj[tKey] !== "object") {
-        modeRoundsObj[tKey] = {};
-      }
-      const rKey = `r${roundNum}`;
-      if (!modeRoundsObj[tKey][rKey] || typeof modeRoundsObj[tKey][rKey] !== "object") {
-        modeRoundsObj[tKey][rKey] = {
-          kills: [],
-          deaths: [],
-          big_map: false,
-          small_map: false
-        };
-      }
-      const entry = modeRoundsObj[tKey][rKey];
-      if (!Array.isArray(entry.kills)) entry.kills = [];
-      if (!Array.isArray(entry.deaths)) entry.deaths = [];
-      if (typeof entry.big_map !== "boolean") entry.big_map = Boolean(entry.big_map);
-      if (typeof entry.small_map !== "boolean") entry.small_map = Boolean(entry.small_map);
-      for (let i = 0; i < maxMembers; i++) {
-        if (entry.kills[i] === undefined) entry.kills[i] = "";
-        if (entry.deaths[i] === undefined) entry.deaths[i] = false;
-      }
-      return entry;
-    }
-
-    function computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers, sb = null) {
-      const scoreCfg = sb || getScoreboardData();
-      const bigPts = parseInt(scoreCfg.big_map_points, 10);
-      const smallPts = parseInt(scoreCfg.small_map_points, 10);
-      const bigVal = Number.isNaN(bigPts) ? 8 : bigPts;
-      const smallVal = Number.isNaN(smallPts) ? 5 : smallPts;
-
-      const members = teamObj.members || [];
-      let totalKills = 0;
-      let totalDeductions = 0;
-      let totalChickenPoints = 0;
-      let totalChickens = 0;
-      let bigMapCount = 0;
-      let smallMapCount = 0;
-      let totalNet = 0;
-
-      const memberStats = [];
-      for (let s = 0; s < maxMembers; s++) {
-        memberStats.push({ kills: 0, deaths: 0, deductionTotal: 0, net: 0 });
-      }
-      const roundTotals = [];
-
-      for (let r = 1; r <= maxRounds; r++) {
-        const entry = getRoundEntry(modeRoundsObj, tIdx, r, maxMembers);
-        let rKills = 0;
-        let rDed = 0;
-
-        for (let s = 0; s < maxMembers; s++) {
-          const m = members[s] || {};
-          const kVal = parseFloat(entry.kills[s]);
-          const killsNum = Number.isNaN(kVal) ? 0 : kVal;
-          const isDead = Boolean(entry.deaths[s]);
-          const dedAmt = isDead ? penaltyDeductionAmount(m.penalty) : 0;
-
-          rKills += killsNum;
-          rDed += dedAmt;
-
-          memberStats[s].kills += killsNum;
-          if (isDead) {
-            memberStats[s].deaths += 1;
-            memberStats[s].deductionTotal += dedAmt;
-          }
-          memberStats[s].net += (killsNum - dedAmt);
-        }
-
-        const isBig = Boolean(entry.big_map);
-        const isSmall = Boolean(entry.small_map);
-        const rChickenPts = (isBig ? bigVal : 0) + (isSmall ? smallVal : 0);
-        const rChickenCnt = (isBig ? 1 : 0) + (isSmall ? 1 : 0);
-
-        if (isBig) bigMapCount += 1;
-        if (isSmall) smallMapCount += 1;
-
-        const rNet = rKills - rDed + rChickenPts;
-        totalKills += rKills;
-        totalDeductions += rDed;
-        totalChickenPoints += rChickenPts;
-        totalChickens += rChickenCnt;
-        totalNet += rNet;
-
-        roundTotals.push({
-          round: r,
-          kills: rKills,
-          deduction: rDed,
-          chickenPoints: rChickenPts,
-          net: rNet
-        });
-      }
-
-      const sumAllDeaths = memberStats.reduce((acc, ms) => acc + ms.deaths, 0);
-
-      return {
-        totalKills,
-        totalDeaths: sumAllDeaths,
-        totalDeductions,
-        totalChickenPoints,
-        totalChickens,
-        bigMapCount,
-        smallMapCount,
-        totalNet,
-        memberStats,
-        roundTotals
-      };
-    }
-
-    function formatNumberDisplay(val) {
-      if (Number.isInteger(val)) return String(val);
-      return String(Math.round(val * 100) / 100);
-    }
-
-    function renderScoreboard(preserveFocus = false) {
-      const sb = getScoreboardData();
-      if (sb.view_style === "board") {
-        renderScoreboardBoardView(preserveFocus);
-      } else {
-        renderScoreboardTableView(preserveFocus);
-      }
-    }
-
-    function renderScoreboardBoardView(preserveFocus = false) {
-      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
-      const sb = getScoreboardData();
-      const activeMode = sb.active_team_mode;
-      const targetScore = sb.target_score || 300;
-      const tMeta = getTeamModeMeta(activeMode);
-      const mData = getModeData(activeMode);
-      const savedTeams = Array.isArray(mData.teams) ? mData.teams : [];
-      const configuredCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
-      const teamCount = Math.max(configuredCount, savedTeams.length);
-      const maxRounds = state.max_rounds || 30;
-      const maxMembers = tMeta.max_members || 4;
-      const modeRoundsObj = sb.rounds_by_mode[activeMode];
-
-      const container = document.getElementById("mainContent");
-      container.innerHTML = "";
-
-      const teamSummaries = [];
-      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
-        const tSaved = savedTeams[tIdx] || {};
-        const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
-        const members = Array.isArray(tSaved.members) ? tSaved.members : [];
-        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
-
-        const colPlayers = [];
-        for (let s = 0; s < maxMembers; s++) {
-          const m = members[s] || {};
-          const mName = (m.name || "").trim() || `${s + 1}번`;
-          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, net: 0 };
-          colPlayers.push({
-            label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(ms.kills)}-${formatNumberDisplay(ms.deductionTotal)})`,
-          });
-        }
-
-        teamSummaries.push({
-          idx: tIdx,
-          name: teamName,
-          netScore: totals.totalNet,
-          totalKills: totals.totalKills,
-          chickenPoints: totals.totalChickenPoints,
-          colPlayers
-        });
-      }
-
-      const grid = document.createElement("div");
-      grid.className = "board-grid";
-
-      const toneClass = HEADER_TONES[0];
-      const headerParts = teamSummaries.map(
-        t => `${escapeHtml(t.name)} ${formatNumberDisplay(t.netScore)}`
-      );
-      const headerText = `[ ${targetScore} ] ${headerParts.join(" : ")}`;
-
-      const boardCard = document.createElement("div");
-      boardCard.className = "match-board-card";
-
-      const headerDiv = document.createElement("div");
-      headerDiv.className = `match-board-header ${toneClass}`;
-      headerDiv.textContent = headerText;
-      boardCard.appendChild(headerDiv);
-
-      const colsDiv = document.createElement("div");
-      colsDiv.className = "match-board-columns";
-      colsDiv.style.gridTemplateColumns = `repeat(${teamSummaries.length}, minmax(0, 1fr))`;
-
-      teamSummaries.forEach(t => {
-        const colDiv = document.createElement("div");
-        colDiv.className = "match-board-col";
-        colDiv.innerHTML = t.colPlayers
-          .map(p => `<div class="match-board-player" title="${escapeHtml(p.label)}">${escapeHtml(p.label)}</div>`)
-          .join("");
-        colsDiv.appendChild(colDiv);
-      });
-      boardCard.appendChild(colsDiv);
-
-      const chickenRow = document.createElement("div");
-      chickenRow.className = "match-board-chicken-row";
-      chickenRow.style.gridTemplateColumns = `repeat(${teamSummaries.length}, minmax(0, 1fr))`;
-
-      teamSummaries.forEach(t => {
-        const cCell = document.createElement("div");
-        cCell.className = `match-board-chicken-cell ${toneClass}`;
-        cCell.textContent = `🍗 : [ ${formatNumberDisplay(t.chickenPoints)} ]`;
-        chickenRow.appendChild(cCell);
-      });
-      boardCard.appendChild(chickenRow);
-
-      const footerDiv = document.createElement("div");
-      footerDiv.className = `match-board-footer ${toneClass}`;
-      boardCard.appendChild(footerDiv);
-
-      grid.appendChild(boardCard);
-      container.appendChild(grid);
-
-      if (preserveFocus && canEdit) {
-        restoreFocusSnapshot(focusSnap);
-      }
-    }
-
-    function renderScoreboardTableView(preserveFocus = false) {
-      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
-      const sb = getScoreboardData();
-      const activeMode = sb.active_team_mode;
-      const tMeta = getTeamModeMeta(activeMode);
-      const mData = getModeData(activeMode);
-      const savedTeams = Array.isArray(mData.teams) ? mData.teams : [];
-      const configuredCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
-      const teamCount = Math.max(configuredCount, savedTeams.length);
-      const maxRounds = state.max_rounds || 30;
-      const maxMembers = tMeta.max_members || 4;
-      const modeRoundsObj = sb.rounds_by_mode[activeMode];
-      const disAttr = canEdit ? "" : "disabled";
-
-      const container = document.getElementById("mainContent");
-      container.innerHTML = "";
-
-      const summaryGrid = document.createElement("div");
-      summaryGrid.className = "sb-summary-grid";
-      summaryGrid.id = "sbSummaryGrid";
-
-      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
-        const tSaved = savedTeams[tIdx] || {};
-        const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
-        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
-
-        const mini = document.createElement("div");
-        mini.className = "sb-mini-card";
-        mini.dataset.summaryTeamIdx = String(tIdx);
-        mini.innerHTML = `
-          <span class="sb-mini-name">${escapeHtml(teamName)}</span>
-          <span class="sb-mini-score" id="sbMiniScore-${tIdx}">${formatNumberDisplay(totals.totalNet)}점 · 🍗+${formatNumberDisplay(totals.totalChickenPoints)}</span>
-        `;
-        summaryGrid.appendChild(mini);
-      }
-      container.appendChild(summaryGrid);
-
-      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
-        const tSaved = savedTeams[tIdx] || {};
-        const teamName = (tSaved.name || "").trim() || `TEAM ${tIdx + 1}`;
-        const members = Array.isArray(tSaved.members) ? tSaved.members : [];
-        const totals = computeTeamScoreboardTotals(tSaved, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
-
-        const card = document.createElement("div");
-        card.className = "sb-team-card";
-
-        const topBar = document.createElement("div");
-        topBar.className = "sb-team-top";
-        topBar.innerHTML = `
-          <span class="sb-team-title">TEAM ${tIdx + 1} · ${escapeHtml(teamName)}</span>
-          <div class="sb-team-totals" id="sbTeamTotals-${tIdx}">
-            <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
-            <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
-            <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
-            <span>🍗 치킨점수: +${formatNumberDisplay(totals.totalChickenPoints)} (큰${totals.bigMapCount}/작${totals.smallMapCount})</span>
-          </div>
-        `;
-        card.appendChild(topBar);
-
-        const tableWrap = document.createElement("div");
-        tableWrap.className = "sb-table-wrap";
-
-        let headerHtml = `<thead><tr><th class="round-col">R</th>`;
-        for (let s = 0; s < maxMembers; s++) {
-          const m = members[s] || {};
-          const mLabel = (m.name || "").trim() || `${s + 1}번`;
-          const dedAmt = penaltyDeductionAmount(m.penalty);
-          headerHtml += `
-            <th>${escapeHtml(mLabel)} 킬</th>
-            <th>${escapeHtml(mLabel)} 데스<br><span style="font-size:10px; font-weight:500; color:#fca5a5;">(-${dedAmt})</span></th>
-          `;
-        }
-        headerHtml += `<th>팀 치킨(큰맵/작은맵)</th><th>라운드 합</th></tr></thead>`;
-
-        let bodyHtml = `<tbody>`;
-        for (let r = 1; r <= maxRounds; r++) {
-          const entry = getRoundEntry(modeRoundsObj, tIdx, r, maxMembers);
-          const rInfo = totals.roundTotals[r - 1];
-          bodyHtml += `<tr><td class="round-col">${r}R</td>`;
-
-          for (let s = 0; s < maxMembers; s++) {
-            const m = members[s] || {};
-            const dedAmt = penaltyDeductionAmount(m.penalty);
-            const kFieldKey = `sb-${currentChannel}-${activeMode}-t${tIdx}-r${r}-s${s}-kill`;
-            const dFieldKey = `sb-${currentChannel}-${activeMode}-t${tIdx}-r${r}-s${s}-death`;
-
-            const rawKill = (focusSnap && focusSnap.fieldKey === kFieldKey)
-              ? focusSnap.value
-              : (entry.kills[s] !== undefined && entry.kills[s] !== "" ? entry.kills[s] : "");
-            const isDead = Boolean(entry.deaths[s]);
-
-            bodyHtml += `
-              <td>
-                <input
-                  type="number"
-                  step="any"
-                  class="kill-input"
-                  data-field-key="${kFieldKey}"
-                  data-sb-t="${tIdx}"
-                  data-sb-r="${r}"
-                  data-sb-s="${s}"
-                  value="${escapeHtml(rawKill)}"
-                  placeholder="0"
-                  ${disAttr}
-                />
-              </td>
-              <td>
-                <div class="death-cell-wrap">
-                  <input
-                    type="checkbox"
-                    class="death-chk"
-                    data-field-key="${dFieldKey}"
-                    data-sb-t="${tIdx}"
-                    data-sb-r="${r}"
-                    data-sb-s="${s}"
-                    ${isDead ? "checked" : ""}
-                    ${disAttr}
-                  />
-                  <span class="pen-tag">${isDead ? `-${dedAmt}` : ""}</span>
-                </div>
-              </td>
-            `;
-          }
-
-          const bigFieldKey = `sb-${currentChannel}-${activeMode}-t${tIdx}-r${r}-bigmap`;
-          const smallFieldKey = `sb-${currentChannel}-${activeMode}-t${tIdx}-r${r}-smallmap`;
-          const isBigChecked = Boolean(entry.big_map);
-          const isSmallChecked = Boolean(entry.small_map);
-
-          bodyHtml += `
-            <td>
-              <div class="map-chk-group">
-                <label class="map-chk-label">
-                  <input
-                    type="checkbox"
-                    class="map-chk big-map-chk"
-                    data-field-key="${bigFieldKey}"
-                    data-sb-t="${tIdx}"
-                    data-sb-r="${r}"
-                    ${isBigChecked ? "checked" : ""}
-                    ${disAttr}
-                  />
-                  <span>큰맵</span>
-                </label>
-                <label class="map-chk-label">
-                  <input
-                    type="checkbox"
-                    class="map-chk small-map-chk"
-                    data-field-key="${smallFieldKey}"
-                    data-sb-t="${tIdx}"
-                    data-sb-r="${r}"
-                    ${isSmallChecked ? "checked" : ""}
-                    ${disAttr}
-                  />
-                  <span>작은맵</span>
-                </label>
-              </div>
-            </td>
-            <td class="round-sum-cell" id="sbRoundSum-${tIdx}-r${r}">${formatNumberDisplay(rInfo.net)}</td>
-          </tr>`;
-        }
-        bodyHtml += `</tbody>`;
-
-        tableWrap.innerHTML = `<table class="sb-table">${headerHtml}${bodyHtml}</table>`;
-        card.appendChild(tableWrap);
-        container.appendChild(card);
-
-        if (canEdit) {
-          tableWrap.querySelectorAll(".kill-input").forEach(inp => {
-            inp.addEventListener("input", () => {
-              const latestSb = getScoreboardData();
-              const latestRounds = latestSb.rounds_by_mode[activeMode];
-              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(inp.dataset.sbT, 10)] || tSaved;
-              const ti = parseInt(inp.dataset.sbT, 10);
-              const rn = parseInt(inp.dataset.sbR, 10);
-              const si = parseInt(inp.dataset.sbS, 10);
-              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
-              ent.kills[si] = inp.value;
-              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
-              scheduleAutoSave();
-            });
-          });
-
-          tableWrap.querySelectorAll(".death-chk").forEach(chk => {
-            chk.addEventListener("change", () => {
-              const latestSb = getScoreboardData();
-              const latestRounds = latestSb.rounds_by_mode[activeMode];
-              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(chk.dataset.sbT, 10)] || tSaved;
-              const ti = parseInt(chk.dataset.sbT, 10);
-              const rn = parseInt(chk.dataset.sbR, 10);
-              const si = parseInt(chk.dataset.sbS, 10);
-              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
-              ent.deaths[si] = chk.checked;
-
-              const m = (latestTeam.members || [])[si] || {};
-              const dedAmt = penaltyDeductionAmount(m.penalty);
-              const tagEl = chk.parentElement ? chk.parentElement.querySelector(".pen-tag") : null;
-              if (tagEl) {
-                tagEl.textContent = chk.checked ? `-${dedAmt}` : "";
-              }
-              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
-              scheduleAutoSave(50);
-            });
-          });
-
-          tableWrap.querySelectorAll(".big-map-chk").forEach(bchk => {
-            bchk.addEventListener("change", () => {
-              const latestSb = getScoreboardData();
-              const latestRounds = latestSb.rounds_by_mode[activeMode];
-              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(bchk.dataset.sbT, 10)] || tSaved;
-              const ti = parseInt(bchk.dataset.sbT, 10);
-              const rn = parseInt(bchk.dataset.sbR, 10);
-              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
-              ent.big_map = bchk.checked;
-              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
-              scheduleAutoSave(50);
-            });
-          });
-
-          tableWrap.querySelectorAll(".small-map-chk").forEach(schk => {
-            schk.addEventListener("change", () => {
-              const latestSb = getScoreboardData();
-              const latestRounds = latestSb.rounds_by_mode[activeMode];
-              const latestTeam = (getModeData(activeMode).teams || [])[parseInt(schk.dataset.sbT, 10)] || tSaved;
-              const ti = parseInt(schk.dataset.sbT, 10);
-              const rn = parseInt(schk.dataset.sbR, 10);
-              const ent = getRoundEntry(latestRounds, ti, rn, maxMembers);
-              ent.small_map = schk.checked;
-              refreshScoreboardTeamTotals(ti, latestTeam, latestRounds, maxRounds, maxMembers, latestSb);
-              scheduleAutoSave(50);
-            });
-          });
-        }
-      }
-
-      if (preserveFocus && canEdit) {
-        restoreFocusSnapshot(focusSnap);
-      }
-    }
-
-    function recomputeAllScoreboardTeamsLive() {
-      const sb = getScoreboardData();
-      const activeMode = sb.active_team_mode;
-      const tMeta = getTeamModeMeta(activeMode);
-      const mData = getModeData(activeMode);
-      const savedTeams = Array.isArray(mData.teams) ? mData.teams : [];
-      const configuredCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
-      const teamCount = Math.max(configuredCount, savedTeams.length);
-      const maxRounds = state.max_rounds || 30;
-      const maxMembers = tMeta.max_members || 4;
-      const modeRoundsObj = sb.rounds_by_mode[activeMode];
-
-      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
-        const tSaved = savedTeams[tIdx] || {};
-        refreshScoreboardTeamTotals(tIdx, tSaved, modeRoundsObj, maxRounds, maxMembers, sb);
-      }
-    }
-
-    function refreshScoreboardTeamTotals(tIdx, teamObj, modeRoundsObj, maxRounds, maxMembers, sb = null) {
-      const totals = computeTeamScoreboardTotals(teamObj, tIdx, modeRoundsObj, maxRounds, maxMembers, sb);
-      const miniEl = document.getElementById(`sbMiniScore-${tIdx}`);
-      if (miniEl) {
-        miniEl.textContent = `${formatNumberDisplay(totals.totalNet)}점 · 🍗+${formatNumberDisplay(totals.totalChickenPoints)}`;
-      }
-      const topTotalsEl = document.getElementById(`sbTeamTotals-${tIdx}`);
-      if (topTotalsEl) {
-        topTotalsEl.innerHTML = `
-          <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
-          <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
-          <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
-          <span>🍗 치킨점수: +${formatNumberDisplay(totals.totalChickenPoints)} (큰${totals.bigMapCount}/작${totals.smallMapCount})</span>
-        `;
-      }
-      totals.roundTotals.forEach(rt => {
-        const cellEl = document.getElementById(`sbRoundSum-${tIdx}-r${rt.round}`);
-        if (cellEl) {
-          cellEl.textContent = formatNumberDisplay(rt.net);
-        }
-      });
-    }
-
-    function addPlayerToTier(tier, inputEl) {
-      if (!canEdit) return;
-      const rawName = (inputEl.value || "").trim();
-      if (!rawName) return;
-
-      const board = getTierBoard();
-      state.tiers.forEach(t => {
-        board[t] = (board[t] || []).filter(n => n !== rawName);
-      });
-      board[tier].push(rawName);
-      inputEl.value = "";
-
-      renderSettingsBar();
-      renderTierBoard(false);
-      scheduleAutoSave(50);
-    }
-
-    function removePlayerFromTier(tier, playerName) {
-      if (!canEdit) return;
-      const board = getTierBoard();
-      board[tier] = (board[tier] || []).filter(n => n !== playerName);
-      renderSettingsBar();
-      renderTierBoard(false);
-      scheduleAutoSave(50);
-    }
-
-    function renderTierBoard(preserveFocus = false) {
-      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
-      const board = getTierBoard();
-      const container = document.getElementById("mainContent");
-      container.innerHTML = "";
-
-      const wrap = document.createElement("div");
-      wrap.className = "tier-groups-wrap";
-
-      const groups = state.tier_groups || [];
-      groups.forEach((grp, gIdx) => {
-        const subTiers = grp.tiers || [];
-        const groupTotal = subTiers.reduce((sum, t) => sum + ((board[t] && board[t].length) || 0), 0);
-
-        const groupCard = document.createElement("div");
-        groupCard.className = "tier-group-card";
-
-        const banner = document.createElement("div");
-        banner.className = "tier-group-banner";
-        banner.innerHTML = `
-          <span>${escapeHtml(grp.group)}</span>
-          <span class="tier-group-count">총 ${groupTotal}명</span>
-        `;
-        groupCard.appendChild(banner);
-
-        const colsWrap = document.createElement("div");
-        colsWrap.className = "subtier-cols " + (subTiers.length >= 4 ? "cols-4" : "cols-1");
-
-        subTiers.forEach((tier, sIdx) => {
-          const players = board[tier] || [];
-          const shortLabel = tier.startsWith(grp.group) && tier !== grp.group
-            ? tier.slice(grp.group.length).trim()
-            : tier;
-
-          const col = document.createElement("div");
-          col.className = "subtier-col";
-
-          const colHeader = document.createElement("div");
-          colHeader.className = "subtier-col-header";
-          colHeader.textContent = `${shortLabel} (${players.length})`;
-          col.appendChild(colHeader);
-
-          const vList = document.createElement("div");
-          vList.className = "subtier-vertical-list";
-
-          if (players.length === 0) {
-            vList.innerHTML = `<span class="info-text" style="text-align:center; padding-top:8px;">-</span>`;
-          } else {
-            players.forEach(name => {
-              const item = document.createElement("div");
-              item.className = "vertical-member-item";
-              item.innerHTML = `
-                <span class="vertical-member-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-                <button type="button" class="chip-del" title="삭제" ${canEdit ? "" : "disabled"}>×</button>
-              `;
-              const delBtn = item.querySelector(".chip-del");
-              if (canEdit) {
-                delBtn.onclick = () => removePlayerFromTier(tier, name);
-              }
-              vList.appendChild(item);
-            });
-          }
-          col.appendChild(vList);
-
-          const inputKey = `tier-add-${currentChannel}-${gIdx}-${sIdx}`;
-          const addBox = document.createElement("div");
-          addBox.className = "subtier-add-box";
-          const inputVal = (focusSnap && focusSnap.fieldKey === inputKey) ? focusSnap.value : "";
-          addBox.innerHTML = `
-            <input type="text" class="subtier-add-input" data-field-key="${inputKey}" placeholder="이름" value="${escapeHtml(inputVal)}" ${canEdit ? "" : "disabled"} />
-            <button type="button" class="subtier-add-btn" ${canEdit ? "" : "disabled"}>+</button>
-          `;
-
-          const addInput = addBox.querySelector(".subtier-add-input");
-          const addBtn = addBox.querySelector(".subtier-add-btn");
-          if (canEdit) {
-            addBtn.onclick = () => addPlayerToTier(tier, addInput);
-            addInput.addEventListener("keydown", (e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                addPlayerToTier(tier, addInput);
-              }
-            });
-          }
-
-          col.appendChild(addBox);
-          colsWrap.appendChild(col);
-        });
-
-        groupCard.appendChild(colsWrap);
-        wrap.appendChild(groupCard);
-      });
-
-      container.appendChild(wrap);
-
-      if (preserveFocus && canEdit) {
-        restoreFocusSnapshot(focusSnap);
-      }
-    }
-
-    function renderTeams(preserveFocus = false) {
-      const focusSnap = preserveFocus ? getFocusSnapshot() : null;
-      const meta = getModeMeta(currentMode);
-      const modeData = getModeData(currentMode);
-      const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
-
-      const listEl = document.getElementById("mainContent");
-      listEl.innerHTML = "";
-      const savedTeams = modeData.teams || [];
-      const disAttr = canEdit ? "" : "disabled";
-
-      for (let tIdx = 0; tIdx < teamCount; tIdx++) {
-        const saved = savedTeams[tIdx] || {};
-        const teamNameKey = `${currentChannel}-${currentMode}-t${tIdx}-name`;
-        const teamName = (focusSnap && focusSnap.fieldKey === teamNameKey)
-          ? focusSnap.value
-          : (saved.name || `TEAM ${tIdx + 1}`);
-        const summary = saved.summary || "";
-        const savedMembers = saved.members || [];
-
-        const card = document.createElement("div");
-        card.className = "card team-card";
-
-        const header = document.createElement("div");
-        header.className = "team-header";
-
-        const left = document.createElement("div");
-        left.className = "team-title-group";
-        left.innerHTML = `
-          <span class="team-badge">TEAM ${tIdx + 1}</span>
-          <label><span class="field-label">팀 이름</span></label>
-          <input type="text" class="team-name-input" data-field-key="${teamNameKey}" value="${escapeHtml(teamName)}" style="width:160px;" ${disAttr} />
-        `;
-        const teamNameInput = left.querySelector(".team-name-input");
-        if (canEdit) {
-          teamNameInput.addEventListener("input", () => scheduleAutoSave());
-        }
-
-        const right = document.createElement("div");
-        right.className = "team-right";
-
-        const summarySpan = document.createElement("span");
-        summarySpan.className = "summary-text";
-        summarySpan.textContent = summary;
-
-        const doneBtn = document.createElement("button");
-        doneBtn.textContent = "완료";
-        doneBtn.disabled = !canEdit;
-        if (canEdit) {
-          doneBtn.onclick = () => completeTeam(card);
-        }
-
-        right.appendChild(summarySpan);
-        right.appendChild(doneBtn);
-
-        header.appendChild(left);
-        header.appendChild(right);
-        card.appendChild(header);
-
-        for (let slot = 1; slot <= meta.max_members; slot++) {
-          const mSaved = savedMembers[slot - 1] || {};
-          const row = document.createElement("div");
-          row.className = "member-row";
-
-          const mNameKey = `${currentChannel}-${currentMode}-t${tIdx}-s${slot}-name`;
-          const mNameVal = (focusSnap && focusSnap.fieldKey === mNameKey)
-            ? focusSnap.value
-            : (mSaved.name || "");
-
-          const matchedTier = lookupAutoTier(mNameVal);
-          const effectiveTier = matchedTier || (mSaved.tier || "");
-
-          const tierOptions = [`<option value="">선택</option>`]
-            .concat(state.tiers.map(t => `<option value="${t}" ${effectiveTier === t ? "selected" : ""}>${t}</option>`))
-            .join("");
-
-          const penaltyVal = mSaved.penalty !== undefined ? mSaved.penalty : 0;
-          const penaltyOptions = state.penalties
-            .map(p => `<option value="${p}" ${Number(penaltyVal) === p ? "selected" : ""}>${p}</option>`)
-            .join("");
-
-          const handicapVal = mSaved.handicap !== undefined ? mSaved.handicap : 0;
-          const handicapOptions = state.handicaps
-            .map(h => `<option value="${h}" ${Number(handicapVal) === h ? "selected" : ""}>${h}</option>`)
-            .join("");
-
-          row.innerHTML = `
-            <span class="slot-label">${slot}번</span>
-            <input type="text" class="member-name" data-field-key="${mNameKey}" placeholder="멤버 이름" value="${escapeHtml(mNameVal)}" ${disAttr} />
-            <span class="field-label">티어</span>
-            <select class="member-tier" ${disAttr}>${tierOptions}</select>
-            <span class="field-label">감점</span>
-            <select class="member-penalty" ${disAttr}>${penaltyOptions}</select>
-            <span class="field-label">킬핸디</span>
-            <select class="member-handicap" ${disAttr}>${handicapOptions}</select>
-          `;
-
-          if (canEdit) {
-            const nameInput = row.querySelector(".member-name");
-            const tierSelect = row.querySelector(".member-tier");
-
-            const applyAutoTier = () => {
-              const autoTier = lookupAutoTier(nameInput.value);
-              if (autoTier && state.tiers.includes(autoTier)) {
-                tierSelect.value = autoTier;
-              }
-            };
-
-            nameInput.addEventListener("input", () => {
-              applyAutoTier();
-              scheduleAutoSave();
-            });
-            nameInput.addEventListener("change", () => {
-              applyAutoTier();
-              scheduleAutoSave(50);
-            });
-            tierSelect.addEventListener("change", () => scheduleAutoSave(50));
-            row.querySelector(".member-penalty").addEventListener("change", () => scheduleAutoSave(50));
-            row.querySelector(".member-handicap").addEventListener("change", () => scheduleAutoSave(50));
-          }
-
-          card.appendChild(row);
-        }
-
-        listEl.appendChild(card);
-      }
-
-      if (preserveFocus && canEdit) {
-        restoreFocusSnapshot(focusSnap);
-      }
-    }
-
-    function renderMainContent(preserveFocus = false) {
-      if (inLobby) {
-        renderLobby();
-        return;
-      }
-      if (currentMode === "tiers") {
-        renderTierBoard(preserveFocus);
-      } else if (currentMode === "scoreboard") {
-        renderScoreboard(preserveFocus);
-      } else {
-        renderTeams(preserveFocus);
-      }
-    }
-
-    function escapeHtml(str) {
-      return String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/"/g, "&quot;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-    }
-
-    async function completeTeam(card) {
-      if (!canEdit) return;
-      let penaltySum = 0;
-      let handicapSum = 0;
-      card.querySelectorAll(".member-row").forEach(row => {
-        penaltySum += parseInt(row.querySelector(".member-penalty").value, 10) || 0;
-        handicapSum += parseInt(row.querySelector(".member-handicap").value, 10) || 0;
-      });
-      card.querySelector(".summary-text").textContent =
-        `완료 · 감점 합계: ${penaltySum} | 킬핸디 합계: ${handicapSum}`;
-      if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-      }
-      await flushAutoSave();
-    }
-
-    async function switchMode(nextMode) {
-      if (nextMode === currentMode) return;
-      if (canEdit && saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        await flushAutoSave();
-      } else if (canEdit && ["solo", "duo", "squad"].includes(currentMode)) {
-        const current = collectCurrentTeamUI();
-        state.data.modes[currentMode] = {
-          team_count: current.team_count,
-          teams: current.teams
-        };
-      }
-      currentMode = nextMode;
-      renderTabs();
-      renderSettingsBar();
-      renderMainContent(false);
-    }
-
-    async function resetCurrentView() {
-      if (!canEdit) return;
-      if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-      }
-
-      const chParam = `channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}`;
-
-      if (currentMode === "tiers") {
-        if (!confirm("티어표를 기본 명단으로 되돌릴까요?")) return;
-        const res = await fetch(`/api/tier-board/reset?${chParam}`, {
-          method: "POST",
-          headers: authHeaders()
-        });
-        if (res.status === 403) {
-          await reloadChannelState(currentChannel, true);
-          return;
-        }
-        if (!res.ok) {
-          alert("초기화 중 오류가 발생했습니다.");
-          return;
-        }
-        const result = await res.json();
-        localVersion = Math.max(localVersion, result.version || 0);
-        state.data = result.data;
-        renderSettingsBar();
-        renderMainContent(false);
-        document.getElementById("saveStatus").textContent = "기본 티어표 복원 완료";
-        return;
-      }
-
-      if (currentMode === "scoreboard") {
-        const sb = getScoreboardData();
-        const tMeta = getTeamModeMeta(sb.active_team_mode);
-        if (!confirm(`[점수판 · ${tMeta.label}] 1~30라운드 기록을 초기화할까요?`)) return;
-        const res = await fetch(`/api/scoreboard/reset?${chParam}`, {
-          method: "POST",
-          headers: authHeaders()
-        });
-        if (res.status === 403) {
-          await reloadChannelState(currentChannel, true);
-          return;
-        }
-        if (!res.ok) {
-          alert("초기화 중 오류가 발생했습니다.");
-          return;
-        }
-        const result = await res.json();
-        localVersion = Math.max(localVersion, result.version || 0);
-        state.data = result.data;
-        renderSettingsBar();
-        renderMainContent(false);
-        document.getElementById("saveStatus").textContent = "점수판 초기화 완료";
-        return;
-      }
-
-      const meta = getModeMeta(currentMode);
-      if (!confirm(`[${meta.label}] 모드 데이터를 초기화할까요?`)) return;
-
-      const res = await fetch(`/api/modes/${currentMode}/reset?${chParam}`, {
-        method: "POST",
-        headers: authHeaders()
-      });
-      if (res.status === 403) {
-        await reloadChannelState(currentChannel, true);
-        return;
-      }
-      if (!res.ok) {
-        alert("초기화 중 오류가 발생했습니다.");
-        return;
-      }
-      const result = await res.json();
-      localVersion = Math.max(localVersion, result.version || 0);
-      state.data = result.data;
-      renderSettingsBar();
-      renderMainContent(false);
-      document.getElementById("saveStatus").textContent = `${meta.label} 초기화 완료`;
-    }
-
-    async function reloadChannelState(chId, preserveFocus = true) {
-      const q = `/api/state?channel=${encodeURIComponent(chId)}&client_id=${encodeURIComponent(clientId)}`;
-      const res = await fetch(q, { headers: authHeaders() });
-      const nextState = await res.json();
-      state = nextState;
-      localVersion = Math.max(localVersion, nextState.version || 1);
-      currentUser = nextState.user || null;
-      isAdminUser = Boolean(nextState.is_admin);
-      canEdit = Boolean(nextState.can_edit);
-
-      renderAuthBar();
-      renderTabs();
-      syncShellVisibility();
-      if (!inLobby) {
-        renderSettingsBar();
-      }
-      renderMainContent(preserveFocus);
-    }
-
-    function connectRealtimeStream() {
-      if (eventSource) {
-        eventSource.close();
-      }
-      const q = `/api/stream?channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}&edit_token=${encodeURIComponent(editToken)}`;
-      eventSource = new EventSource(q);
-      eventSource.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (!msg || typeof msg.version !== "number") return;
-          if (msg.version <= localVersion) return;
-          if (saveTimer || isSaving || pendingSave) return;
-
-          localVersion = msg.version;
-          currentUser = msg.user || currentUser;
-          isAdminUser = Boolean(msg.is_admin);
-          canEdit = Boolean(msg.can_edit);
-          if (state) {
-            state.data = msg.data;
-          }
-
-          renderAuthBar();
-          if (!inLobby) {
-            renderSettingsBar();
-          }
-          renderMainContent(true);
-          document.getElementById("saveStatus").textContent = "실시간 동기화됨";
-        } catch (e) {}
-      };
-      eventSource.onerror = () => {
-        document.getElementById("saveStatus").textContent = "재연결 중...";
-      };
-    }
-
-    async function initApp() {
-      const q = `/api/state?channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}`;
-      const res = await fetch(q, { headers: authHeaders() });
-      state = await res.json();
-      localVersion = state.version || 1;
-      currentUser = state.user || null;
-      isAdminUser = Boolean(state.is_admin);
-      canEdit = Boolean(state.can_edit);
-
-      renderAuthBar();
-      renderTabs();
-      syncShellVisibility();
-      renderLobby();
-      connectRealtimeStream();
-
-      if (!currentUser) {
-        openNicknameModal(false);
-      }
-    }
-
-    initApp();
-  </script>
-</body>
-</html>
-"""
-
-
-@app.get("/", response_class=HTMLResponse)
-def index():
-    return HTML_PAGE
-
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
