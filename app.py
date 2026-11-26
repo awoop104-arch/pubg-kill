@@ -14,8 +14,16 @@ EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
 FILE_LOCK = threading.Lock()
-STATE_VERSION = 1
+STATE_VERSION = int(time.time() * 1000)
 PRESENCE_TTL_SECONDS = 25.0
+
+
+def bump_state_version() -> int:
+    global STATE_VERSION
+    now_ms = int(time.time() * 1000)
+    STATE_VERSION = max(STATE_VERSION + 1, now_ms)
+    return STATE_VERSION
+
 
 # channel_id -> { client_id: last_seen_monotonic }
 CHANNEL_PRESENCE: dict[str, dict[str, float]] = {}
@@ -67,13 +75,12 @@ INITIAL_PLAYER_TIER_MAP = {
     "재석": "1티어 중",
     "실인": "1티어 하",
     "군단": "1티어 하",
-    "재화": "1티어 하",
     "씬봉": "1티어 하",
     "오숍": "1티어 하",
     "주누": "1티어 하",
     "우진": "1티어 하",
-    "임수민": "1티어 하",
-    "정우욱": "1티어 하",
+    "수민": "1티어 하",
+    "정욱": "1티어 하",
     "태민": "1티어 하",
     "뒷축": "2티어 최상",
     "까릉": "2티어 최상",
@@ -134,7 +141,7 @@ INITIAL_PLAYER_TIER_MAP = {
     "아로": "3티어 중",
     "성인": "3티어 중",
     "무디": "3티어 중",
-    "주녕": "3티어 중",
+    "준형": "3티어 중",
     "와니": "3티어 중",
     "랑구": "3티어 하",
     "도유": "3티어 하",
@@ -374,7 +381,6 @@ def default_channel_payload(raw_source: dict | None = None):
     return {
         "active_bjs": active_bjs,
         "modes": modes_out,
-        "tier_board": normalize_tier_board(src.get("tier_board")),
         "scoreboard": normalize_scoreboard_data(src.get("scoreboard")),
     }
 
@@ -382,6 +388,7 @@ def default_channel_payload(raw_source: dict | None = None):
 def default_db():
     return {
         "users": {},
+        "tier_board": default_tier_board(),
         "channels": {
             cid: default_channel_payload()
             for cid, _, _ in CHANNELS
@@ -415,6 +422,23 @@ def load_db():
                     "role": role,
                 }
 
+    # 전체 방 공용 tier_board 우선 로드 (없으면 기존 채널별 tier_board에서 마이그레이션)
+    if isinstance(raw.get("tier_board"), dict):
+        base["tier_board"] = normalize_tier_board(raw.get("tier_board"))
+    else:
+        migrated_board = None
+        if isinstance(raw.get("channels"), dict):
+            for cid, _, _ in CHANNELS:
+                ch_raw = raw["channels"].get(cid)
+                if isinstance(ch_raw, dict) and isinstance(ch_raw.get("tier_board"), dict):
+                    candidate = normalize_tier_board(ch_raw.get("tier_board"))
+                    if any(len(v) > 0 for v in candidate.values()):
+                        migrated_board = candidate
+                        break
+        if migrated_board is None and isinstance(raw.get("tier_board"), dict):
+            migrated_board = normalize_tier_board(raw.get("tier_board"))
+        base["tier_board"] = migrated_board if migrated_board is not None else default_tier_board()
+
     if "channels" not in raw and ("modes" in raw or "teams" in raw or "team_count" in raw):
         legacy = {}
         if "modes" not in raw and ("teams" in raw or "team_count" in raw):
@@ -426,7 +450,6 @@ def load_db():
             }
         else:
             legacy["modes"] = raw.get("modes", {})
-        legacy["tier_board"] = raw.get("tier_board")
         legacy["scoreboard"] = raw.get("scoreboard")
         base["channels"]["kill1"] = default_channel_payload(legacy)
         return base
@@ -440,7 +463,6 @@ def load_db():
 
 
 def save_db(data):
-    global STATE_VERSION
     parent_dir = os.path.dirname(os.path.abspath(DATA_FILE))
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
@@ -448,7 +470,7 @@ def save_db(data):
     with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp_file, DATA_FILE)
-    STATE_VERSION += 1
+    bump_state_version()
 
 
 class RegisterNicknamePayload(BaseModel):
@@ -706,6 +728,7 @@ def get_state(request: Request, channel: str = "kill1", client_id: str = "", in_
         db_obj = load_db()
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
+        shared_tier_board = db_obj["tier_board"]
         user_obj = db_obj["users"].get(cid)
         admin_flag = is_admin_actor(db_obj, cid, token)
         editable_flag = can_edit_channel(db_obj, ch_id, cid, token)
@@ -743,12 +766,12 @@ def get_state(request: Request, channel: str = "kill1", client_id: str = "", in_
             for g, sub in TIER_GROUPS
         ],
         "tiers": TIERS,
-        "tier_board": ch_data["tier_board"],
+        "tier_board": shared_tier_board,
         "penalties": PENALTIES,
         "handicaps": HANDICAPS,
         "data": {
             "modes": ch_data["modes"],
-            "tier_board": ch_data["tier_board"],
+            "tier_board": shared_tier_board,
             "scoreboard": ch_data["scoreboard"],
         },
     }
@@ -773,13 +796,14 @@ def update_mode(mode_key: str, payload: ModeStatePayload, request: Request, chan
         save_db(db_obj)
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
+        shared_tier_board = db_obj["tier_board"]
     return {
         "ok": True,
         "version": version,
         "mode": mode_key,
         "data": {
             "modes": ch_data["modes"],
-            "tier_board": ch_data["tier_board"],
+            "tier_board": shared_tier_board,
             "scoreboard": ch_data["scoreboard"],
         },
     }
@@ -800,13 +824,14 @@ def reset_mode(mode_key: str, request: Request, channel: str = "kill1", client_i
         save_db(db_obj)
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
+        shared_tier_board = db_obj["tier_board"]
     return {
         "ok": True,
         "version": version,
         "mode": mode_key,
         "data": {
             "modes": ch_data["modes"],
-            "tier_board": ch_data["tier_board"],
+            "tier_board": shared_tier_board,
             "scoreboard": ch_data["scoreboard"],
         },
     }
@@ -818,17 +843,18 @@ def update_tier_board(payload: TierBoardPayload, request: Request, channel: str 
     with FILE_LOCK:
         db_obj = load_db()
         require_channel_editor(request, db_obj, ch_id, payload.client_id)
-        ch_data = db_obj["channels"][ch_id]
-        ch_data["tier_board"] = normalize_tier_board(payload.tier_board)
+        db_obj["tier_board"] = normalize_tier_board(payload.tier_board)
         save_db(db_obj)
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
+        shared_tier_board = db_obj["tier_board"]
     return {
         "ok": True,
         "version": version,
+        "tier_board": shared_tier_board,
         "data": {
             "modes": ch_data["modes"],
-            "tier_board": ch_data["tier_board"],
+            "tier_board": shared_tier_board,
             "scoreboard": ch_data["scoreboard"],
         },
     }
@@ -840,17 +866,18 @@ def reset_tier_board(request: Request, channel: str = "kill1", client_id: str = 
     with FILE_LOCK:
         db_obj = load_db()
         require_channel_editor(request, db_obj, ch_id, client_id)
-        ch_data = db_obj["channels"][ch_id]
-        ch_data["tier_board"] = default_tier_board()
+        db_obj["tier_board"] = default_tier_board()
         save_db(db_obj)
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
+        shared_tier_board = db_obj["tier_board"]
     return {
         "ok": True,
         "version": version,
+        "tier_board": shared_tier_board,
         "data": {
             "modes": ch_data["modes"],
-            "tier_board": ch_data["tier_board"],
+            "tier_board": shared_tier_board,
             "scoreboard": ch_data["scoreboard"],
         },
     }
@@ -874,12 +901,13 @@ def update_scoreboard(payload: ScoreboardPayload, request: Request, channel: str
         save_db(db_obj)
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
+        shared_tier_board = db_obj["tier_board"]
     return {
         "ok": True,
         "version": version,
         "data": {
             "modes": ch_data["modes"],
-            "tier_board": ch_data["tier_board"],
+            "tier_board": shared_tier_board,
             "scoreboard": ch_data["scoreboard"],
         },
     }
@@ -899,12 +927,13 @@ def reset_scoreboard(request: Request, channel: str = "kill1", client_id: str = 
         save_db(db_obj)
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
+        shared_tier_board = db_obj["tier_board"]
     return {
         "ok": True,
         "version": version,
         "data": {
             "modes": ch_data["modes"],
-            "tier_board": ch_data["tier_board"],
+            "tier_board": shared_tier_board,
             "scoreboard": ch_data["scoreboard"],
         },
     }
@@ -940,15 +969,17 @@ async def stream_state(request: Request, channel: str = "kill1", client_id: str 
                 if current_version != last_sent_version:
                     db_obj = load_db()
                     ch_data = db_obj["channels"][ch_id]
+                    shared_tier_board = db_obj["tier_board"]
                     current_payload = {
                         "version": current_version,
                         "channel": ch_id,
                         "user": db_obj["users"].get(cid),
                         "is_admin": is_admin_actor(db_obj, cid, token),
                         "can_edit": can_edit_channel(db_obj, ch_id, cid, token),
+                        "tier_board": shared_tier_board,
                         "data": {
                             "modes": ch_data["modes"],
-                            "tier_board": ch_data["tier_board"],
+                            "tier_board": shared_tier_board,
                             "scoreboard": ch_data["scoreboard"],
                         },
                     }
@@ -963,7 +994,7 @@ async def stream_state(request: Request, channel: str = "kill1", client_id: str 
                 yield ": keepalive\n\n"
                 last_ping = time.monotonic()
 
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
     return StreamingResponse(
         event_generator(),
@@ -1966,6 +1997,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     })();
     let adminCache = { users: [], room_active_map: {} };
     let presenceTimer = null;
+    let syncPollTimer = null;
 
     function authHeaders(extra = {}) {
       const headers = {
@@ -2015,6 +2047,71 @@ HTML_PAGE = r"""<!DOCTYPE html>
       presenceTimer = setInterval(() => {
         sendPresenceHeartbeat(!inLobby);
       }, 10000);
+    }
+
+    function startSyncBackupLoop() {
+      if (syncPollTimer) clearInterval(syncPollTimer);
+      syncPollTimer = setInterval(async () => {
+        if (!state || saveTimer || isSaving || pendingSave) return;
+        try {
+          const lobbyParam = inLobby ? 1 : 0;
+          const q = `/api/state?channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}&in_lobby=${lobbyParam}`;
+          const res = await fetch(q, { headers: authHeaders() });
+          if (!res.ok) return;
+          const latest = await res.json();
+          if (typeof latest.version === "number" && latest.version > localVersion) {
+            applyRemoteState(latest, true);
+          }
+        } catch (e) {}
+      }, 2000);
+    }
+
+    function applyRemoteState(msg, preserveFocus = true) {
+      if (!msg || typeof msg.version !== "number") return;
+      if (msg.version <= localVersion) return;
+      if (saveTimer || isSaving || pendingSave) return;
+
+      localVersion = msg.version;
+      if (msg.user) {
+        currentUser = msg.user;
+        if (currentUser.nickname) setSavedNickname(currentUser.nickname);
+      } else if (Object.prototype.hasOwnProperty.call(msg, "user")) {
+        currentUser = null;
+        setSavedNickname("");
+      }
+      if (Object.prototype.hasOwnProperty.call(msg, "is_admin")) {
+        isAdminUser = Boolean(msg.is_admin);
+      }
+      if (Object.prototype.hasOwnProperty.call(msg, "can_edit")) {
+        canEdit = Boolean(msg.can_edit);
+      }
+      if (Array.isArray(msg.channels_meta) && state) {
+        state.channels_meta = msg.channels_meta;
+      }
+
+      const sharedBoard = msg.tier_board || (msg.data && msg.data.tier_board) || null;
+      if (state) {
+        if (!state.data) state.data = {};
+        if (msg.data) {
+          if (msg.data.modes) state.data.modes = msg.data.modes;
+          if (msg.data.scoreboard) state.data.scoreboard = msg.data.scoreboard;
+        }
+        if (sharedBoard) {
+          state.tier_board = sharedBoard;
+          state.data.tier_board = sharedBoard;
+        }
+      }
+
+      renderAuthBar();
+      if (!inLobby) {
+        renderSettingsBar();
+      }
+      renderMainContent(preserveFocus);
+      const statusEl = document.getElementById("saveStatus");
+      if (statusEl) statusEl.textContent = "실시간 동기화됨";
+      if (!currentUser) {
+        openNicknameModal(false);
+      }
     }
 
     function renderAuthBar() {
@@ -2368,7 +2465,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       container.innerHTML = `
         <div class="card">
           <h2 style="margin:0 0 4px 0; font-size:18px;">채널 선택</h2>
-          <div class="info-text">원하는 채널을 선택하면 이동합니다.</div>
+          <div class="info-text">원하는 방을 선택하면 이동합니다.</div>
           <div class="lobby-grid">
             ${chList.map(ch => `
               <div class="lobby-card" onclick="selectChannel('${ch.id}')">
@@ -2444,15 +2541,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     function getTierBoard() {
-      if (!state.data.tier_board) {
-        state.data.tier_board = {};
+      if (!state.tier_board && state.data && state.data.tier_board) {
+        state.tier_board = state.data.tier_board;
+      }
+      if (!state.tier_board || typeof state.tier_board !== "object") {
+        state.tier_board = {};
       }
       state.tiers.forEach(t => {
-        if (!Array.isArray(state.data.tier_board[t])) {
-          state.data.tier_board[t] = [];
+        if (!Array.isArray(state.tier_board[t])) {
+          state.tier_board[t] = [];
         }
       });
-      return state.data.tier_board;
+      if (state.data) {
+        state.data.tier_board = state.tier_board;
+      }
+      return state.tier_board;
     }
 
     function buildDynamicPlayerTierMap() {
@@ -2564,8 +2667,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
           }
           const result = await res.json();
           localVersion = Math.max(localVersion, result.version || 0);
-          if (!saveTimer && !pendingSave) {
-            state.data = result.data;
+          const updatedBoard = result.tier_board || (result.data && result.data.tier_board);
+          if (updatedBoard) {
+            state.tier_board = updatedBoard;
+            if (state.data) state.data.tier_board = updatedBoard;
           }
           document.getElementById("saveStatus").textContent = "실시간 저장 완료";
         } else if (currentMode === "scoreboard") {
@@ -2685,9 +2790,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · 티어표] 티어별 인원 추가/삭제 시 실시간 반영`;
+          `[공용 · 티어표] 모든 방에 실시간 동시 반영`;
         leftEl.innerHTML = `
-          <strong>전체 등록 인원</strong>
+          <strong>전체 방 공용 · 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
         `;
         resetBtn.textContent = "기본 티어표 복원";
@@ -3487,7 +3592,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       });
     }
 
-    function addPlayerToTier(tier, inputEl) {
+    async function addPlayerToTier(tier, inputEl) {
       if (!canEdit) return;
       const rawName = (inputEl.value || "").trim();
       if (!rawName) return;
@@ -3501,16 +3606,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       renderSettingsBar();
       renderTierBoard(false);
-      scheduleAutoSave(50);
+      await flushAutoSave();
     }
 
-    function removePlayerFromTier(tier, playerName) {
+    async function removePlayerFromTier(tier, playerName) {
       if (!canEdit) return;
       const board = getTierBoard();
       board[tier] = (board[tier] || []).filter(n => n !== playerName);
       renderSettingsBar();
       renderTierBoard(false);
-      scheduleAutoSave(50);
+      await flushAutoSave();
     }
 
     function renderTierBoard(preserveFocus = false) {
@@ -3577,7 +3682,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           }
           col.appendChild(vList);
 
-          const inputKey = `tier-add-${currentChannel}-${gIdx}-${sIdx}`;
+          const inputKey = `tier-add-shared-${gIdx}-${sIdx}`;
           const addBox = document.createElement("div");
           addBox.className = "subtier-add-box";
           const inputVal = (focusSnap && focusSnap.fieldKey === inputKey) ? focusSnap.value : "";
@@ -3813,7 +3918,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const chParam = `channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}`;
 
       if (currentMode === "tiers") {
-        if (!confirm("티어표를 기본 명단으로 되돌릴까요?")) return;
+        if (!confirm("전체 방 공용 티어표를 기본 명단으로 되돌릴까요?")) return;
         const res = await fetch(`/api/tier-board/reset?${chParam}`, {
           method: "POST",
           headers: authHeaders()
@@ -3828,7 +3933,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
         const result = await res.json();
         localVersion = Math.max(localVersion, result.version || 0);
-        state.data = result.data;
+        const updatedBoard = result.tier_board || (result.data && result.data.tier_board);
+        if (updatedBoard) {
+          state.tier_board = updatedBoard;
+          if (state.data) state.data.tier_board = updatedBoard;
+        }
         renderSettingsBar();
         renderMainContent(false);
         document.getElementById("saveStatus").textContent = "기본 티어표 복원 완료";
@@ -3921,37 +4030,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
       eventSource.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (!msg || typeof msg.version !== "number") return;
-          if (msg.version <= localVersion) return;
-          if (saveTimer || isSaving || pendingSave) return;
-
-          localVersion = msg.version;
-          if (msg.user) {
-            currentUser = msg.user;
-            if (currentUser.nickname) setSavedNickname(currentUser.nickname);
-          } else {
-            currentUser = null;
-            setSavedNickname("");
-          }
-          isAdminUser = Boolean(msg.is_admin);
-          canEdit = Boolean(msg.can_edit);
-          if (state) {
-            state.data = msg.data;
-          }
-
-          renderAuthBar();
-          if (!inLobby) {
-            renderSettingsBar();
-          }
-          renderMainContent(true);
-          document.getElementById("saveStatus").textContent = "실시간 동기화됨";
-          if (!currentUser) {
-            openNicknameModal(false);
-          }
+          applyRemoteState(msg, true);
         } catch (e) {}
       };
       eventSource.onerror = () => {
-        document.getElementById("saveStatus").textContent = "재연결 중...";
+        const statusEl = document.getElementById("saveStatus");
+        if (statusEl) statusEl.textContent = "백업 동기화 중...";
       };
     }
 
@@ -3982,6 +4066,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       renderLobby();
       connectRealtimeStream();
       startPresenceLoop();
+      startSyncBackupLoop();
 
       if (!currentUser) {
         openNicknameModal(false);
