@@ -1886,7 +1886,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
           <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">채널 권한 비활성화</button>
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 방 권한 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 채널 권한 비활성화</button>
         </div>
       </div>
 
