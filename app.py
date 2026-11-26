@@ -473,6 +473,11 @@ class AdminRolePayload(BaseModel):
     actor_client_id: str = ""
 
 
+class AdminDeleteUserPayload(BaseModel):
+    client_id: str
+    actor_client_id: str = ""
+
+
 class AdminRoomBjPayload(BaseModel):
     channel_id: str
     client_id: str
@@ -609,6 +614,33 @@ def admin_set_role(payload: AdminRolePayload, request: Request):
             for ch in db_obj["channels"].values():
                 if target_cid in ch.get("active_bjs", []):
                     ch["active_bjs"].remove(target_cid)
+
+        save_db(db_obj)
+        version = STATE_VERSION
+    return {"ok": True, "version": version}
+
+
+@app.post("/api/admin/delete-user")
+def admin_delete_user(payload: AdminDeleteUserPayload, request: Request):
+    target_cid = (payload.client_id or "").strip()
+    actor_cid = (payload.actor_client_id or request.headers.get("X-Client-Id") or "").strip()
+    if not target_cid:
+        raise HTTPException(status_code=400, detail="삭제할 사용자 ID가 없습니다.")
+    if actor_cid and target_cid == actor_cid:
+        raise HTTPException(status_code=400, detail="현재 로그인된 본인 계정은 삭제할 수 없습니다.")
+
+    with FILE_LOCK:
+        db_obj = load_db()
+        require_admin(request, db_obj, actor_cid)
+        if target_cid not in db_obj.get("users", {}):
+            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+        db_obj["users"].pop(target_cid, None)
+        for ch in db_obj.get("channels", {}).values():
+            if target_cid in ch.get("active_bjs", []):
+                ch["active_bjs"].remove(target_cid)
+        for c_id, _, _ in CHANNELS:
+            touch_presence(c_id, target_cid, remove=True)
 
         save_db(db_obj)
         version = STATE_VERSION
@@ -1236,7 +1268,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       border: 1px solid #cbd5e1;
       border-radius: 12px;
       width: 100%;
-      max-width: 640px;
+      max-width: 680px;
       max-height: 86vh;
       overflow-y: auto;
       padding: 18px 20px;
@@ -1853,7 +1885,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           </select>
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">이 채널 권한 비활성화</button>
+          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)"채널 권한 비활성화</button>
           <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 방 권한 비활성화</button>
         </div>
       </div>
@@ -1907,7 +1939,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function setSavedNickname(nick) {
       try {
-        if (nick) localStorage.setItem(NICK_STORAGE_KEY, nick);
+        if (nick) {
+          localStorage.setItem(NICK_STORAGE_KEY, nick);
+        } else {
+          localStorage.removeItem(NICK_STORAGE_KEY);
+        }
       } catch (e) {}
     }
 
@@ -2173,6 +2209,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
 
       listEl.innerHTML = filtered.map(u => {
+        const isSelf = u.client_id === clientId;
         const isBj = u.role === "bj";
         const isAdm = u.role === "admin";
         const isActiveInCh = isBj && activeSet.has(u.client_id);
@@ -2196,22 +2233,25 @@ HTML_PAGE = r"""<!DOCTYPE html>
             : `<button type="button" class="success" onclick="toggleBjInChannel('${u.client_id}', true)">활성화</button>`;
         }
 
+        const safeNickForJs = String(u.nickname || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+
         return `
           <div class="admin-user-row">
             <div>
               <div style="font-weight:800; font-size:14px;">
                 ${escapeHtml(u.nickname)}
-                ${u.client_id === clientId ? `<span class="channel-pill" style="margin-left:4px;">나</span>` : ""}
+                ${isSelf ? `<span class="channel-pill" style="margin-left:4px;">나</span>` : ""}
               </div>
               <div class="info-text">${escapeHtml(descText)}</div>
             </div>
-            <div style="display:flex; align-items:center; gap:8px;">
+            <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
               <select onchange="changeUserRole('${u.client_id}', this.value)">
                 <option value="user" ${u.role === "user" ? "selected" : ""}>일반유저</option>
                 <option value="bj" ${u.role === "bj" ? "selected" : ""}>비제이</option>
                 <option value="admin" ${u.role === "admin" ? "selected" : ""}>관리자</option>
               </select>
               ${actionHtml}
+              <button type="button" class="danger" ${isSelf ? "disabled title='본인 계정은 삭제할 수 없습니다'" : `onclick="deleteUserAccount('${u.client_id}', '${safeNickForJs}')"`}>삭제</button>
             </div>
           </div>
         `;
@@ -2228,6 +2268,24 @@ HTML_PAGE = r"""<!DOCTYPE html>
         await fetchAdminUsers();
         await reloadChannelState(currentChannel, true);
       }
+    }
+
+    async function deleteUserAccount(targetClientId, nickname) {
+      if (!confirm(`'${nickname}' 유저를 삭제할까요?\n삭제 시 등록 정보와 방 권한이 모두 제거됩니다.`)) {
+        return;
+      }
+      const res = await fetch("/api/admin/delete-user", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ client_id: targetClientId, actor_client_id: clientId })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData.detail || "유저 삭제 중 오류가 발생했습니다.");
+        return;
+      }
+      await fetchAdminUsers();
+      await reloadChannelState(currentChannel, true);
     }
 
     async function toggleBjInChannel(targetClientId, active) {
@@ -2286,7 +2344,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         backBtn.style.display = "none";
         tabsEl.style.display = "none";
         settingsCard.style.display = "none";
-        document.getElementById("modeInfo").textContent = "입장할 채널(킬내기 1~3번방, 메펀CK방)을 선택해 주세요.";
+        document.getElementById("modeInfo").textContent = "입장할 채널을 선택해 주세요.";
       } else {
         badge.textContent = CHANNEL_LABELS[currentChannel] || currentChannel;
         backBtn.style.display = "inline-block";
@@ -2406,7 +2464,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const clean = (rawName || "").trim();
           if (clean) {
             map[clean] = tier;
-            map[clean.replace(/\\s+/g, "")] = tier;
+            map[clean.replace(/\s+/g, "")] = tier;
           }
         });
       });
@@ -2420,7 +2478,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (Object.prototype.hasOwnProperty.call(map, cleaned)) {
         return map[cleaned];
       }
-      const noSpace = cleaned.replace(/\\s+/g, "");
+      const noSpace = cleaned.replace(/\s+/g, "");
       if (Object.prototype.hasOwnProperty.call(map, noSpace)) {
         return map[noSpace];
       }
@@ -3835,6 +3893,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       currentUser = nextState.user || null;
       if (currentUser && currentUser.nickname) {
         setSavedNickname(currentUser.nickname);
+      } else {
+        setSavedNickname("");
       }
       isAdminUser = Boolean(nextState.is_admin);
       canEdit = Boolean(nextState.can_edit);
@@ -3846,6 +3906,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
         renderSettingsBar();
       }
       renderMainContent(preserveFocus);
+      if (!currentUser) {
+        openNicknameModal(false);
+      }
     }
 
     function connectRealtimeStream() {
@@ -3866,6 +3929,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           if (msg.user) {
             currentUser = msg.user;
             if (currentUser.nickname) setSavedNickname(currentUser.nickname);
+          } else {
+            currentUser = null;
+            setSavedNickname("");
           }
           isAdminUser = Boolean(msg.is_admin);
           canEdit = Boolean(msg.can_edit);
@@ -3879,6 +3945,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           }
           renderMainContent(true);
           document.getElementById("saveStatus").textContent = "실시간 동기화됨";
+          if (!currentUser) {
+            openNicknameModal(false);
+          }
         } catch (e) {}
       };
       eventSource.onerror = () => {
@@ -3900,6 +3969,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const restored = await tryRestoreSavedNickname();
         if (restored) {
           await reloadChannelState(currentChannel, false);
+        } else {
+          setSavedNickname("");
         }
       } else if (currentUser && currentUser.nickname) {
         setSavedNickname(currentUser.nickname);
