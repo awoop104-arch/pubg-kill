@@ -1711,22 +1711,29 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
     .match-board-card {
       width: 100%;
-      max-width: 710px;
+      max-width: 680px;
       background: #ffffff;
       border: 1.5px solid #222222;
       box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
       overflow: hidden;
     }
+    .match-board-card.two-teams {
+      max-width: 390px;
+    }
     .match-board-header {
-      padding: 4px 6px;
+      padding: 5px 8px;
       border-bottom: 1.5px solid #222222;
       text-align: center;
-      font-size: 11px;
+      font-size: 13px;
       font-weight: 800;
       color: #111111;
       letter-spacing: -0.2px;
-      line-height: 1.25;
+      line-height: 1.3;
       word-break: keep-all;
+    }
+    .match-board-card.two-teams .match-board-header {
+      font-size: 14px;
+      padding: 5px 6px;
     }
     .match-board-header.tone-blue { background: #b8d3f0; }
     .match-board-header.tone-pink { background: #f8cedc; }
@@ -1739,37 +1746,48 @@ HTML_PAGE = r"""<!DOCTYPE html>
       border-bottom: 1px solid #222222;
     }
     .match-board-col {
-      padding: 4px 4px;
+      padding: 5px 5px;
       text-align: center;
       min-width: 0;
+    }
+    .match-board-card.two-teams .match-board-col {
+      padding: 4px 4px;
     }
     .match-board-col + .match-board-col {
       border-left: 1px dashed #444444;
     }
     .match-board-player {
-      padding: 1px 2px;
-      font-size: 10.5px;
+      padding: 1.5px 2px;
+      font-size: 12.5px;
       font-weight: 800;
       color: #111111;
-      line-height: 1.3;
+      line-height: 1.38;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .match-board-card.two-teams .match-board-player {
+      font-size: 13.5px;
+      line-height: 1.35;
     }
     .match-board-chicken-row {
       display: grid;
       border-bottom: 1px solid #222222;
     }
     .match-board-chicken-cell {
-      padding: 3px 3px;
+      padding: 4px 4px;
       text-align: center;
-      font-size: 10.5px;
+      font-size: 12.5px;
       font-weight: 800;
       color: #111111;
       min-width: 0;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .match-board-card.two-teams .match-board-chicken-cell {
+      font-size: 13px;
+      padding: 3px 4px;
     }
     .match-board-chicken-cell + .match-board-chicken-cell {
       border-left: 1px dashed #444444;
@@ -1781,7 +1799,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .match-board-chicken-cell.tone-yellow { background: #fdf3d2; }
 
     .match-board-footer {
-      height: 11px;
+      height: 10px;
+    }
+    .match-board-card.two-teams .match-board-footer {
+      height: 8px;
     }
     .match-board-footer.tone-blue { background: #e3effb; }
     .match-board-footer.tone-pink { background: #fce7ee; }
@@ -1796,9 +1817,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       max-width: 820px;
       margin: 0 auto;
     }
+    .mefun-board-grid.two-teams {
+      max-width: 500px;
+      gap: 8px;
+    }
     @media (max-width: 680px) {
-      .mefun-board-grid {
+      .mefun-board-grid,
+      .mefun-board-grid.two-teams {
         grid-template-columns: 1fr;
+        max-width: 420px;
       }
     }
     .mefun-team-card {
@@ -1811,10 +1838,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
       padding: 6px 8px;
       border-bottom: 1.5px solid #222222;
       text-align: center;
-      font-size: 14px;
+      font-size: 16px;
       font-weight: 800;
       color: #111111;
       letter-spacing: -0.3px;
+    }
+    .mefun-board-grid.two-teams .mefun-team-header {
+      font-size: 16.5px;
+      padding: 5px 6px;
     }
     .mefun-team-header.tone-blue { background: #b4d1f0; }
     .mefun-team-header.tone-pink { background: #f7cad8; }
@@ -1826,15 +1857,22 @@ HTML_PAGE = r"""<!DOCTYPE html>
       background: #ffffff;
       border-bottom: 1.5px solid #222222;
     }
+    .mefun-board-grid.two-teams .mefun-members-box {
+      padding: 5px 6px;
+    }
     .mefun-member-line {
-      font-size: 13px;
+      font-size: 15px;
       font-weight: 800;
       color: #111111;
-      line-height: 1.48;
+      line-height: 1.52;
       text-align: center;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .mefun-board-grid.two-teams .mefun-member-line {
+      font-size: 15.5px;
+      line-height: 1.45;
     }
     .mefun-bottom-bar {
       display: grid;
@@ -1843,12 +1881,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .mefun-bottom-cell {
       padding: 5px 6px;
       text-align: center;
-      font-size: 12px;
+      font-size: 14px;
       font-weight: 800;
       color: #111111;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .mefun-board-grid.two-teams .mefun-bottom-cell {
+      font-size: 14.5px;
+      padding: 4px 5px;
     }
     .mefun-bottom-cell + .mefun-bottom-cell {
       border-left: 1.5px solid #222222;
@@ -1956,6 +1998,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const CLIENT_STORAGE_KEY = "pubg_kill_match_client_id";
     const NICK_STORAGE_KEY = "pubg_kill_match_nickname";
     const TOKEN_STORAGE_KEY = "pubg_kill_match_edit_token";
+    const VIEW_STYLE_STORAGE_KEY = "pubg_kill_match_sb_view_style";
     const HEADER_TONES = ["tone-blue", "tone-pink", "tone-purple", "tone-orange"];
     const CHANNEL_LABELS = {
       kill1: "킬내기 1번방",
@@ -1994,6 +2037,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
       } catch (e) {}
     }
 
+    function getSavedViewStyle() {
+      try {
+        const v = (localStorage.getItem(VIEW_STYLE_STORAGE_KEY) || "").trim();
+        return (v === "board" || v === "table") ? v : "";
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function setSavedViewStyle(v) {
+      try {
+        if (v === "board" || v === "table") {
+          localStorage.setItem(VIEW_STYLE_STORAGE_KEY, v);
+        }
+      } catch (e) {}
+    }
+
     const clientId = getOrCreateClientId();
 
     let state = null;
@@ -2008,6 +2068,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let canEdit = false;
     let isAdminUser = false;
     let currentUser = null;
+    let localViewStyle = getSavedViewStyle();
     let editToken = (() => {
       try { return localStorage.getItem(TOKEN_STORAGE_KEY) || ""; } catch (e) { return ""; }
     })();
@@ -2148,7 +2209,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
         if (!state.data) state.data = {};
         if (msg.data) {
           if (msg.data.modes) state.data.modes = msg.data.modes;
-          if (msg.data.scoreboard) state.data.scoreboard = msg.data.scoreboard;
+          if (msg.data.scoreboard) {
+            const incomingSb = msg.data.scoreboard;
+            const preferredStyle = localViewStyle || (state.data.scoreboard && state.data.scoreboard.view_style) || incomingSb.view_style || "table";
+            state.data.scoreboard = {
+              ...incomingSb,
+              view_style: preferredStyle
+            };
+          }
         }
         if (sharedBoard) {
           state.tier_board = sharedBoard;
@@ -2570,7 +2638,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (!state.data.scoreboard || typeof state.data.scoreboard !== "object") {
         state.data.scoreboard = {
           active_team_mode: "solo",
-          view_style: "table",
+          view_style: localViewStyle || "table",
           target_score: 300,
           big_map_points: 8,
           small_map_points: 5,
@@ -2588,7 +2656,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (!["solo", "duo", "squad"].includes(state.data.scoreboard.active_team_mode)) {
         state.data.scoreboard.active_team_mode = "solo";
       }
-      if (!["table", "board"].includes(state.data.scoreboard.view_style)) {
+      if (localViewStyle === "board" || localViewStyle === "table") {
+        state.data.scoreboard.view_style = localViewStyle;
+      } else if (!["table", "board"].includes(state.data.scoreboard.view_style)) {
         state.data.scoreboard.view_style = "table";
       }
       const parsedTarget = parseInt(state.data.scoreboard.target_score, 10);
@@ -2773,7 +2843,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
             state.data.scoreboard.big_map_points = result.data.scoreboard.big_map_points;
             state.data.scoreboard.small_map_points = result.data.scoreboard.small_map_points;
             state.data.scoreboard.active_team_mode = result.data.scoreboard.active_team_mode;
-            state.data.scoreboard.view_style = result.data.scoreboard.view_style;
+            if (!localViewStyle) {
+              state.data.scoreboard.view_style = result.data.scoreboard.view_style;
+            }
           }
           document.getElementById("saveStatus").textContent = "실시간 저장 완료";
         } else {
@@ -2859,9 +2931,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[공용 · 티어표] 모든 채널에 실시간 동시 반영`;
+          `[ 공용 · 티어표] 모든 채널에 실시간 동시 반영`;
         leftEl.innerHTML = `
-          <strong>전체 채널 공용 · 등록 인원</strong>
+          <strong> 공용 · 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
         `;
         resetBtn.textContent = "기본 티어표 복원";
@@ -3059,18 +3131,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     async function switchScoreboardViewStyle(nextStyle) {
       const sb = getScoreboardData();
-      if (sb.view_style === nextStyle) return;
-      if (canEdit && saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        await flushAutoSave();
-      }
+      if (sb.view_style === nextStyle && localViewStyle === nextStyle) return;
+      localViewStyle = nextStyle;
+      setSavedViewStyle(nextStyle);
       getScoreboardData().view_style = nextStyle;
       renderSettingsBar();
       renderScoreboard(false);
-      if (canEdit) {
-        scheduleAutoSave(50);
-      }
     }
 
     function penaltyDeductionAmount(rawPenalty) {
@@ -3134,7 +3200,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       const memberStats = [];
       for (let s = 0; s < maxMembers; s++) {
-        // 
         memberStats.push({
           kills: 0,
           deaths: 0,
@@ -3253,7 +3318,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       container.innerHTML = "";
 
       const grid = document.createElement("div");
-      grid.className = "mefun-board-grid";
+      grid.className = "mefun-board-grid" + (teamCount <= 2 ? " two-teams" : "");
 
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const tSaved = savedTeams[tIdx] || {};
@@ -3355,7 +3420,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const headerText = `[ ${targetScore} ] ${headerParts.join(" : ")}`;
 
       const boardCard = document.createElement("div");
-      boardCard.className = "match-board-card";
+      boardCard.className = "match-board-card" + (teamSummaries.length <= 2 ? " two-teams" : "");
 
       const headerDiv = document.createElement("div");
       headerDiv.className = `match-board-header ${toneClass}`;
@@ -4012,7 +4077,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const chParam = `channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}`;
 
       if (currentMode === "tiers") {
-        if (!confirm("공용 티어표를 기본 명단으로 되돌릴까요?")) return;
+        if (!confirm("전체 방 공용 티어표를 기본 명단으로 되돌릴까요?")) return;
         const res = await fetch(`/api/tier-board/reset?${chParam}`, {
           method: "POST",
           headers: authHeaders()
@@ -4056,7 +4121,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
         const result = await res.json();
         localVersion = Math.max(localVersion, result.version || 0);
+        const keepStyle = localViewStyle || (state.data && state.data.scoreboard && state.data.scoreboard.view_style);
         state.data = result.data;
+        if (keepStyle && state.data && state.data.scoreboard) {
+          state.data.scoreboard.view_style = keepStyle;
+        }
         renderSettingsBar();
         renderMainContent(false);
         document.getElementById("saveStatus").textContent = "점수판 초기화 완료";
@@ -4091,6 +4160,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const q = `/api/state?channel=${encodeURIComponent(chId)}&client_id=${encodeURIComponent(clientId)}&in_lobby=${lobbyParam}`;
       const res = await fetch(q, { headers: authHeaders() });
       const nextState = await res.json();
+      if (localViewStyle && nextState && nextState.data && nextState.data.scoreboard) {
+        nextState.data.scoreboard.view_style = localViewStyle;
+      }
       state = nextState;
       localVersion = Math.max(localVersion, nextState.version || 1);
       currentUser = nextState.user || null;
@@ -4136,6 +4208,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const q = `/api/state?channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}&in_lobby=${lobbyParam}`;
       const res = await fetch(q, { headers: authHeaders() });
       state = await res.json();
+      if (localViewStyle && state && state.data && state.data.scoreboard) {
+        state.data.scoreboard.view_style = localViewStyle;
+      }
       localVersion = state.version || 1;
       currentUser = state.user || null;
       isAdminUser = Boolean(state.is_admin);
