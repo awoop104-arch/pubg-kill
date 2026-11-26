@@ -2368,7 +2368,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       container.innerHTML = `
         <div class="card">
           <h2 style="margin:0 0 4px 0; font-size:18px;">채널 선택</h2>
-          <div class="info-text">원하는 방을 선택하면 솔로·듀오·스쿼드, 티어표, 점수판·전광판으로 이동합니다.</div>
+          <div class="info-text">원하는 채널을 선택하면 이동합니다.</div>
           <div class="lobby-grid">
             ${chList.map(ch => `
               <div class="lobby-card" onclick="selectChannel('${ch.id}')">
