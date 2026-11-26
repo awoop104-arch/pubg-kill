@@ -2861,7 +2861,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         document.getElementById("modeInfo").textContent =
           `[공용 · 티어표] 모든 채널에 실시간 동시 반영`;
         leftEl.innerHTML = `
-          <strong>전체 방 공용 · 등록 인원</strong>
+          <strong>전체 채널 공용 · 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
         `;
         resetBtn.textContent = "기본 티어표 복원";
@@ -3134,7 +3134,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       const memberStats = [];
       for (let s = 0; s < maxMembers; s++) {
-        // 각 멤버가 자신의 킬핸디 점수를 기본 점수로 시작(1회 반영)
+        // 
         memberStats.push({
           kills: 0,
           deaths: 0,
@@ -3272,7 +3272,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
           if (!hasAnyActivity && s > 0 && activeMode !== "solo") continue;
 
           const displayName = mName || `${s + 1}번`;
-          const lineText = `${displayName} ${formatNumberDisplay(ms.net)} [${formatNumberDisplay(ms.kills)} -${formatNumberDisplay(ms.deductionTotal)}]`;
+          const killsWithHandicap = ms.kills + ms.handicap;
+          const lineText = `${displayName} ${formatNumberDisplay(ms.net)} [${formatNumberDisplay(killsWithHandicap)} -${formatNumberDisplay(ms.deductionTotal)}]`;
           memberLines.push(`<div class="mefun-member-line" title="${escapeHtml(lineText)}">${escapeHtml(lineText)}</div>`);
         }
 
@@ -3327,8 +3328,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const m = members[s] || {};
           const mName = (m.name || "").trim() || `${s + 1}번`;
           const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, handicap: 0, net: 0 };
+          const killsWithHandicap = ms.kills + ms.handicap;
           colPlayers.push({
-            label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(ms.kills)}-${formatNumberDisplay(ms.deductionTotal)})`,
+            label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(killsWithHandicap)}-${formatNumberDisplay(ms.deductionTotal)})`,
           });
         }
 
@@ -3336,7 +3338,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           idx: tIdx,
           name: teamName,
           netScore: totals.totalNet,
-          totalKills: totals.totalKills,
+          totalKills: totals.totalKills + totals.totalHandicap,
           chickenPoints: totals.totalChickenPoints,
           achievementPct: formatAchievementPct(totals.totalNet, targetScore),
           colPlayers
@@ -4010,7 +4012,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const chParam = `channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}`;
 
       if (currentMode === "tiers") {
-        if (!confirm("전체 방 공용 티어표를 기본 명단으로 되돌릴까요?")) return;
+        if (!confirm("공용 티어표를 기본 명단으로 되돌릴까요?")) return;
         const res = await fetch(`/api/tier-board/reset?${chParam}`, {
           method: "POST",
           headers: authHeaders()
