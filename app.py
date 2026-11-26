@@ -225,60 +225,14 @@ def verify_edit_token(token: str | None) -> bool:
     return hmac.compare_digest(token.strip(), expected)
 
 
-def normalize_nickname(nickname: str) -> str:
-    return " ".join((nickname or "").strip().split()).lower()
-
-
-def is_nickname_taken(db_obj: dict, nickname: str, exclude_client_id: str | None = None) -> bool:
-    target = normalize_nickname(nickname)
-    if not target:
-        return False
-    users = db_obj.get("users", {})
-    if not isinstance(users, dict):
-        return False
-    for cid, u in users.items():
-        if exclude_client_id and cid == exclude_client_id:
-            continue
-        if normalize_nickname(u.get("nickname", "")) == target:
-            return True
-    return False
-
-
-def is_admin_actor(db_obj: dict, client_id: str | None, token: str | None) -> bool:
-    if verify_edit_token(token):
-        return True
-    if client_id:
-        u = db_obj.get("users", {}).get(client_id)
-        if isinstance(u, dict) and u.get("role") == "admin":
-            return True
-    return False
-
-
-def can_edit_channel(db_obj: dict, channel_id: str, client_id: str | None, token: str | None) -> bool:
-    if is_admin_actor(db_obj, client_id, token):
-        return True
-    if not client_id:
-        return False
-    u = db_obj.get("users", {}).get(client_id)
-    if not isinstance(u, dict) or u.get("role") != "bj":
-        return False
-    ch_obj = db_obj.get("channels", {}).get(channel_id, {})
-    active_bjs = ch_obj.get("active_bjs", [])
-    return isinstance(active_bjs, list) and client_id in active_bjs
-
-
-def require_admin(request: Request, db_obj: dict, client_id: str | None = None):
+def is_logged_in(request: Request) -> bool:
     token = request.headers.get("X-Edit-Token", "")
-    cid = (client_id or request.headers.get("X-Client-Id") or "").strip()
-    if not is_admin_actor(db_obj, cid, token):
-        raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다.")
+    return verify_edit_token(token)
 
 
-def require_channel_editor(request: Request, db_obj: dict, channel_id: str, client_id: str | None = None):
-    token = request.headers.get("X-Edit-Token", "")
-    cid = (client_id or request.headers.get("X-Client-Id") or "").strip()
-    if not can_edit_channel(db_obj, channel_id, cid, token):
-        raise HTTPException(status_code=403, detail="이 채널에 대한 수정 권한이 없습니다.")
+def require_full_edit(request: Request):
+    if not is_logged_in(request):
+        raise HTTPException(status_code=403, detail="로그인이 필요한 기능입니다.")
 
 
 def default_tier_board():
@@ -389,12 +343,7 @@ def default_channel_payload(raw_source: dict | None = None):
             "teams": teams,
         }
 
-    active_bjs = src.get("active_bjs", [])
-    if not isinstance(active_bjs, list):
-        active_bjs = []
-
     return {
-        "active_bjs": active_bjs,
         "modes": modes_out,
         "scoreboard": normalize_scoreboard_data(src.get("scoreboard")),
     }
@@ -402,7 +351,6 @@ def default_channel_payload(raw_source: dict | None = None):
 
 def default_db():
     return {
-        "users": {},
         "tier_board_initialized": False,
         "tier_board": default_tier_board(),
         "channels": {
@@ -425,18 +373,6 @@ def load_db():
 
     if not isinstance(raw, dict):
         return base
-
-    raw_users = raw.get("users", {})
-    if isinstance(raw_users, dict):
-        for cid, u in raw_users.items():
-            if isinstance(u, dict) and str(u.get("nickname", "")).strip():
-                role = u.get("role", "user")
-                if role not in {"user", "bj", "admin"}:
-                    role = "user"
-                base["users"][str(cid)] = {
-                    "nickname": str(u["nickname"]).strip(),
-                    "role": role,
-                }
 
     tb_init = bool(raw.get("tier_board_initialized", False))
     if isinstance(raw.get("tier_board"), dict):
@@ -493,11 +429,6 @@ def save_db(data):
     bump_state_version()
 
 
-class RegisterNicknamePayload(BaseModel):
-    client_id: str
-    nickname: str
-
-
 class PresenceHeartbeatPayload(BaseModel):
     client_id: str
     channel_id: str
@@ -506,41 +437,15 @@ class PresenceHeartbeatPayload(BaseModel):
 
 class AuthUnlockPayload(BaseModel):
     pin: str
-    client_id: str = ""
-
-
-class AdminRolePayload(BaseModel):
-    client_id: str
-    role: str
-    actor_client_id: str = ""
-
-
-class AdminDeleteUserPayload(BaseModel):
-    client_id: str
-    actor_client_id: str = ""
-
-
-class AdminRoomBjPayload(BaseModel):
-    channel_id: str
-    client_id: str
-    active: bool
-    actor_client_id: str = ""
-
-
-class AdminDisableAllPayload(BaseModel):
-    channel_id: str | None = None
-    actor_client_id: str = ""
 
 
 class ModeStatePayload(BaseModel):
     team_count: int
     teams: list
-    client_id: str = ""
 
 
 class TierBoardPayload(BaseModel):
     tier_board: dict
-    client_id: str = ""
 
 
 class ScoreboardPayload(BaseModel):
@@ -550,7 +455,6 @@ class ScoreboardPayload(BaseModel):
     big_map_points: int = 8
     small_map_points: int = 5
     rounds_by_mode: dict = {}
-    client_id: str = ""
 
 
 app = FastAPI(title="PUBG 킬내기 관리 웹")
@@ -566,176 +470,24 @@ def presence_heartbeat(payload: PresenceHeartbeatPayload):
     return {"ok": True, "viewer_counts": counts}
 
 
-@app.post("/api/user/register")
-def register_nickname(payload: RegisterNicknamePayload):
-    cid = (payload.client_id or "").strip()
-    clean_nick = " ".join((payload.nickname or "").strip().split())
-    if not cid:
-        raise HTTPException(status_code=400, detail="클라이언트 ID가 없습니다.")
-    if not clean_nick:
-        raise HTTPException(status_code=400, detail="닉네임을 입력해 주세요.")
-
-    with FILE_LOCK:
-        db_obj = load_db()
-        if is_nickname_taken(db_obj, clean_nick, exclude_client_id=cid):
-            raise HTTPException(status_code=409, detail="이미 사용 중인 닉네임입니다. 다른 닉네임을 입력해 주세요.")
-
-        existing = db_obj["users"].get(cid)
-        role = existing.get("role", "user") if isinstance(existing, dict) else "user"
-        if role not in {"user", "bj", "admin"}:
-            role = "user"
-
-        db_obj["users"][cid] = {
-            "nickname": clean_nick,
-            "role": role,
-        }
-        save_db(db_obj)
-        version = STATE_VERSION
-        user_obj = db_obj["users"][cid]
-
-    return {"ok": True, "version": version, "user": user_obj}
-
-
 @app.post("/api/auth/unlock")
 def unlock_editor(payload: AuthUnlockPayload):
     if not hmac.compare_digest((payload.pin or "").strip(), EDIT_PIN.strip()):
         raise HTTPException(status_code=401, detail="비밀번호(PIN)가 올바르지 않습니다.")
-
-    cid = (payload.client_id or "").strip()
-    with FILE_LOCK:
-        db_obj = load_db()
-        if cid and cid in db_obj["users"]:
-            db_obj["users"][cid]["role"] = "admin"
-            for ch in db_obj["channels"].values():
-                if cid in ch.get("active_bjs", []):
-                    ch["active_bjs"].remove(cid)
-            save_db(db_obj)
-
     return {"ok": True, "edit_token": issue_edit_token()}
 
 
 @app.get("/api/auth/verify")
-def verify_editor(request: Request, client_id: str = ""):
-    token = request.headers.get("X-Edit-Token", "")
-    cid = (client_id or request.headers.get("X-Client-Id") or "").strip()
-    with FILE_LOCK:
-        db_obj = load_db()
-        admin_ok = is_admin_actor(db_obj, cid, token)
-    return {"ok": admin_ok, "is_admin": admin_ok}
-
-
-@app.get("/api/admin/users")
-def admin_get_users(request: Request, client_id: str = ""):
-    with FILE_LOCK:
-        db_obj = load_db()
-        require_admin(request, db_obj, client_id)
-        users_list = [
-            {"client_id": uid, "nickname": u.get("nickname", ""), "role": u.get("role", "user")}
-            for uid, u in db_obj.get("users", {}).items()
-        ]
-        room_active_map = {
-            cid: list(ch.get("active_bjs", []))
-            for cid, ch in db_obj.get("channels", {}).items()
-        }
-    return {"ok": True, "users": users_list, "room_active_map": room_active_map}
-
-
-@app.post("/api/admin/role")
-def admin_set_role(payload: AdminRolePayload, request: Request):
-    if payload.role not in {"user", "bj", "admin"}:
-        raise HTTPException(status_code=400, detail="올바르지 않은 역할입니다.")
-    target_cid = (payload.client_id or "").strip()
-    with FILE_LOCK:
-        db_obj = load_db()
-        require_admin(request, db_obj, payload.actor_client_id)
-        if target_cid not in db_obj.get("users", {}):
-            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
-
-        db_obj["users"][target_cid]["role"] = payload.role
-        if payload.role != "bj":
-            for ch in db_obj["channels"].values():
-                if target_cid in ch.get("active_bjs", []):
-                    ch["active_bjs"].remove(target_cid)
-
-        save_db(db_obj)
-        version = STATE_VERSION
-    return {"ok": True, "version": version}
-
-
-@app.post("/api/admin/delete-user")
-def admin_delete_user(payload: AdminDeleteUserPayload, request: Request):
-    target_cid = (payload.client_id or "").strip()
-    actor_cid = (payload.actor_client_id or request.headers.get("X-Client-Id") or "").strip()
-    if not target_cid:
-        raise HTTPException(status_code=400, detail="삭제할 사용자 ID가 없습니다.")
-    if actor_cid and target_cid == actor_cid:
-        raise HTTPException(status_code=400, detail="현재 로그인된 본인 계정은 삭제할 수 없습니다.")
-
-    with FILE_LOCK:
-        db_obj = load_db()
-        require_admin(request, db_obj, actor_cid)
-        if target_cid not in db_obj.get("users", {}):
-            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
-
-        db_obj["users"].pop(target_cid, None)
-        for ch in db_obj.get("channels", {}).values():
-            if target_cid in ch.get("active_bjs", []):
-                ch["active_bjs"].remove(target_cid)
-        for c_id, _, _ in CHANNELS:
-            touch_presence(c_id, target_cid, remove=True)
-
-        save_db(db_obj)
-        version = STATE_VERSION
-    return {"ok": True, "version": version}
-
-
-@app.post("/api/admin/room-bj")
-def admin_toggle_room_bj(payload: AdminRoomBjPayload, request: Request):
-    if payload.channel_id not in VALID_CHANNELS:
-        raise HTTPException(status_code=400, detail="올바르지 않은 채널입니다.")
-    target_cid = (payload.client_id or "").strip()
-    with FILE_LOCK:
-        db_obj = load_db()
-        require_admin(request, db_obj, payload.actor_client_id)
-        user = db_obj.get("users", {}).get(target_cid)
-        if not user:
-            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
-        if user.get("role") != "bj":
-            raise HTTPException(status_code=400, detail="비제이 역할 사용자만 활성화할 수 있습니다.")
-
-        active_list = db_obj["channels"][payload.channel_id].setdefault("active_bjs", [])
-        if payload.active and target_cid not in active_list:
-            active_list.append(target_cid)
-        elif not payload.active and target_cid in active_list:
-            active_list.remove(target_cid)
-
-        save_db(db_obj)
-        version = STATE_VERSION
-    return {"ok": True, "version": version}
-
-
-@app.post("/api/admin/disable-all")
-def admin_disable_all(payload: AdminDisableAllPayload, request: Request):
-    with FILE_LOCK:
-        db_obj = load_db()
-        require_admin(request, db_obj, payload.actor_client_id)
-        if payload.channel_id:
-            if payload.channel_id not in VALID_CHANNELS:
-                raise HTTPException(status_code=400, detail="올바르지 않은 채널입니다.")
-            db_obj["channels"][payload.channel_id]["active_bjs"] = []
-        else:
-            for ch in db_obj["channels"].values():
-                ch["active_bjs"] = []
-        save_db(db_obj)
-        version = STATE_VERSION
-    return {"ok": True, "version": version}
+def verify_editor(request: Request):
+    logged_in = is_logged_in(request)
+    return {"ok": logged_in, "logged_in": logged_in}
 
 
 @app.get("/api/state")
 def get_state(request: Request, channel: str = "kill1", client_id: str = "", in_lobby: int = 0):
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     cid = (client_id or request.headers.get("X-Client-Id") or "").strip()
-    token = request.headers.get("X-Edit-Token", "")
+    logged_in = is_logged_in(request)
 
     with FILE_LOCK:
         if cid:
@@ -749,29 +501,25 @@ def get_state(request: Request, channel: str = "kill1", client_id: str = "", in_
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
         shared_tier_board = db_obj["tier_board"]
-        user_obj = db_obj["users"].get(cid)
-        admin_flag = is_admin_actor(db_obj, cid, token)
-        editable_flag = can_edit_channel(db_obj, ch_id, cid, token)
 
         channels_meta = []
         for c_id, c_label, c_desc in CHANNELS:
-            c_obj = db_obj["channels"][c_id]
             channels_meta.append({
                 "id": c_id,
                 "label": c_label,
                 "desc": c_desc,
-                "can_edit": can_edit_channel(db_obj, c_id, cid, token),
+                "full_edit": logged_in,
+                "scoreboard_edit": True,
                 "viewer_count": get_channel_viewer_count(c_id),
-                "active_bj_count": len(c_obj.get("active_bjs", [])),
             })
 
     return {
         "version": version,
         "channel": ch_id,
         "channels_meta": channels_meta,
-        "user": user_obj,
-        "is_admin": admin_flag,
-        "can_edit": editable_flag,
+        "logged_in": logged_in,
+        "full_edit": logged_in,
+        "scoreboard_edit": True,
         "modes_meta": [
             {"key": k, "label": label, "max_members": max_m}
             for k, label, max_m in MODES
@@ -799,6 +547,7 @@ def get_state(request: Request, channel: str = "kill1", client_id: str = "", in_
 
 @app.put("/api/modes/{mode_key}")
 def update_mode(mode_key: str, payload: ModeStatePayload, request: Request, channel: str = "kill1"):
+    require_full_edit(request)
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     valid_keys = {k for k, _, _ in TEAM_MODES}
     if mode_key not in valid_keys:
@@ -807,7 +556,6 @@ def update_mode(mode_key: str, payload: ModeStatePayload, request: Request, chan
     count = max(2, min(10, int(payload.team_count)))
     with FILE_LOCK:
         db_obj = load_db()
-        require_channel_editor(request, db_obj, ch_id, payload.client_id)
         ch_data = db_obj["channels"][ch_id]
         ch_data["modes"][mode_key] = {
             "team_count": count,
@@ -830,7 +578,8 @@ def update_mode(mode_key: str, payload: ModeStatePayload, request: Request, chan
 
 
 @app.post("/api/modes/{mode_key}/reset")
-def reset_mode(mode_key: str, request: Request, channel: str = "kill1", client_id: str = ""):
+def reset_mode(mode_key: str, request: Request, channel: str = "kill1"):
+    require_full_edit(request)
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     valid_keys = {k for k, _, _ in TEAM_MODES}
     if mode_key not in valid_keys:
@@ -838,7 +587,6 @@ def reset_mode(mode_key: str, request: Request, channel: str = "kill1", client_i
 
     with FILE_LOCK:
         db_obj = load_db()
-        require_channel_editor(request, db_obj, ch_id, client_id)
         ch_data = db_obj["channels"][ch_id]
         ch_data["modes"][mode_key] = default_mode_data()
         save_db(db_obj)
@@ -859,10 +607,10 @@ def reset_mode(mode_key: str, request: Request, channel: str = "kill1", client_i
 
 @app.put("/api/tier-board")
 def update_tier_board(payload: TierBoardPayload, request: Request, channel: str = "kill1"):
+    require_full_edit(request)
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     with FILE_LOCK:
         db_obj = load_db()
-        require_channel_editor(request, db_obj, ch_id, payload.client_id)
         db_obj["tier_board_initialized"] = True
         db_obj["tier_board"] = normalize_tier_board(payload.tier_board, is_initialized=True)
         save_db(db_obj)
@@ -882,11 +630,11 @@ def update_tier_board(payload: TierBoardPayload, request: Request, channel: str 
 
 
 @app.post("/api/tier-board/reset")
-def reset_tier_board(request: Request, channel: str = "kill1", client_id: str = ""):
+def reset_tier_board(request: Request, channel: str = "kill1"):
+    require_full_edit(request)
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     with FILE_LOCK:
         db_obj = load_db()
-        require_channel_editor(request, db_obj, ch_id, client_id)
         db_obj["tier_board_initialized"] = True
         db_obj["tier_board"] = default_tier_board()
         save_db(db_obj)
@@ -910,7 +658,6 @@ def update_scoreboard(payload: ScoreboardPayload, request: Request, channel: str
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     with FILE_LOCK:
         db_obj = load_db()
-        require_channel_editor(request, db_obj, ch_id, payload.client_id)
         ch_data = db_obj["channels"][ch_id]
         ch_data["scoreboard"] = normalize_scoreboard_data({
             "active_team_mode": payload.active_team_mode,
@@ -936,11 +683,11 @@ def update_scoreboard(payload: ScoreboardPayload, request: Request, channel: str
 
 
 @app.post("/api/scoreboard/reset")
-def reset_scoreboard(request: Request, channel: str = "kill1", client_id: str = ""):
+def reset_scoreboard(request: Request, channel: str = "kill1"):
+    require_full_edit(request)
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     with FILE_LOCK:
         db_obj = load_db()
-        require_channel_editor(request, db_obj, ch_id, client_id)
         ch_data = db_obj["channels"][ch_id]
         sb = normalize_scoreboard_data(ch_data.get("scoreboard"))
         active = sb.get("active_team_mode", "solo")
@@ -966,6 +713,7 @@ async def stream_state(request: Request, channel: str = "kill1", client_id: str 
     ch_id = channel if channel in VALID_CHANNELS else "kill1"
     cid = (client_id or request.query_params.get("client_id") or "").strip()
     token = request.headers.get("X-Edit-Token") or request.query_params.get("edit_token") or ""
+    logged_in = verify_edit_token(token)
     lobby_flag = int(in_lobby or 0) == 1
 
     async def event_generator():
@@ -995,9 +743,9 @@ async def stream_state(request: Request, channel: str = "kill1", client_id: str 
                     current_payload = {
                         "version": current_version,
                         "channel": ch_id,
-                        "user": db_obj["users"].get(cid),
-                        "is_admin": is_admin_actor(db_obj, cid, token),
-                        "can_edit": can_edit_channel(db_obj, ch_id, cid, token),
+                        "logged_in": logged_in,
+                        "full_edit": logged_in,
+                        "scoreboard_edit": True,
                         "tier_board": shared_tier_board,
                         "data": {
                             "modes": ch_data["modes"],
@@ -1162,21 +910,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       align-items: center;
       gap: 8px;
     }
-    .auth-right {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px;
-    }
-    .user-nick-tag {
-      font-size: 13px;
-      font-weight: 800;
-      color: #0f172a;
-      background: #f1f5f9;
-      border: 1px solid #cbd5e1;
-      padding: 4px 10px;
-      border-radius: 999px;
-    }
     .lock-badge {
       display: inline-flex;
       align-items: center;
@@ -1250,20 +983,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
       color: #fff;
       border-color: #1e293b;
     }
-    button.success {
-      background: #0f766e;
-      color: #fff;
-      border-color: #0f766e;
-    }
     button.danger {
       background: #fff;
       border-color: #fca5a5;
       color: #b91c1c;
-    }
-    button.danger-solid {
-      background: #dc2626;
-      border-color: #dc2626;
-      color: #fff;
     }
 
     .lobby-grid {
@@ -1299,77 +1022,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       font-size: 13px;
       color: #475569;
       margin-bottom: 12px;
-    }
-
-    .modal-backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(15, 23, 42, 0.55);
-      display: none;
-      align-items: center;
-      justify-content: center;
-      z-index: 200;
-      padding: 16px;
-    }
-    .modal-backdrop.open {
-      display: flex;
-    }
-    .modal-box {
-      background: #fff;
-      border: 1px solid #cbd5e1;
-      border-radius: 12px;
-      width: 100%;
-      max-width: 680px;
-      max-height: 86vh;
-      overflow-y: auto;
-      padding: 18px 20px;
-      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.22);
-    }
-    .modal-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid #e2e8f0;
-    }
-    .modal-title {
-      margin: 0;
-      font-size: 17px;
-      font-weight: 800;
-    }
-    .admin-toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 12px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-      margin-bottom: 10px;
-    }
-    .admin-filter-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-    .admin-user-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 10px;
-      padding: 9px 4px;
-      border-bottom: 1px solid #f1f5f9;
-    }
-    .error-msg {
-      color: #b91c1c;
-      font-size: 12px;
-      font-weight: 700;
-      min-height: 16px;
-      margin-top: 6px;
     }
 
     .team-header {
@@ -1703,6 +1355,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       min-width: 66px;
     }
 
+    /* 전광판 보기: 2팀이든 3팀 이상이든 컴팩트한 동일 규격 크기로 축소 */
     .board-grid {
       display: flex;
       justify-content: center;
@@ -1711,29 +1364,29 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
     .match-board-card {
       width: 100%;
-      max-width: 680px;
+      max-width: 390px;
       background: #ffffff;
       border: 1.5px solid #222222;
       box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
       overflow: hidden;
     }
-    .match-board-card.two-teams {
-      max-width: 390px;
+    .match-board-card.many-teams {
+      max-width: 480px;
     }
     .match-board-header {
-      padding: 5px 8px;
+      padding: 5px 6px;
       border-bottom: 1.5px solid #222222;
       text-align: center;
-      font-size: 13px;
+      font-size: 13.5px;
       font-weight: 800;
       color: #111111;
-      letter-spacing: -0.2px;
-      line-height: 1.3;
+      letter-spacing: -0.25px;
+      line-height: 1.28;
       word-break: keep-all;
     }
-    .match-board-card.two-teams .match-board-header {
-      font-size: 14px;
-      padding: 5px 6px;
+    .match-board-card.many-teams .match-board-header {
+      font-size: 12px;
+      padding: 4px 5px;
     }
     .match-board-header.tone-blue { background: #b8d3f0; }
     .match-board-header.tone-pink { background: #f8cedc; }
@@ -1746,36 +1399,33 @@ HTML_PAGE = r"""<!DOCTYPE html>
       border-bottom: 1px solid #222222;
     }
     .match-board-col {
-      padding: 5px 5px;
+      padding: 4px 3px;
       text-align: center;
       min-width: 0;
-    }
-    .match-board-card.two-teams .match-board-col {
-      padding: 4px 4px;
     }
     .match-board-col + .match-board-col {
       border-left: 1px dashed #444444;
     }
     .match-board-player {
-      padding: 1.5px 2px;
-      font-size: 12.5px;
+      padding: 1px 1px;
+      font-size: 13px;
       font-weight: 800;
       color: #111111;
-      line-height: 1.38;
+      line-height: 1.32;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .match-board-card.two-teams .match-board-player {
-      font-size: 13.5px;
-      line-height: 1.35;
+    .match-board-card.many-teams .match-board-player {
+      font-size: 11px;
+      line-height: 1.28;
     }
     .match-board-chicken-row {
       display: grid;
       border-bottom: 1px solid #222222;
     }
     .match-board-chicken-cell {
-      padding: 4px 4px;
+      padding: 3px 3px;
       text-align: center;
       font-size: 12.5px;
       font-weight: 800;
@@ -1785,9 +1435,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .match-board-card.two-teams .match-board-chicken-cell {
-      font-size: 13px;
-      padding: 3px 4px;
+    .match-board-card.many-teams .match-board-chicken-cell {
+      font-size: 11px;
+      padding: 3px 2px;
     }
     .match-board-chicken-cell + .match-board-chicken-cell {
       border-left: 1px dashed #444444;
@@ -1799,9 +1449,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .match-board-chicken-cell.tone-yellow { background: #fdf3d2; }
 
     .match-board-footer {
-      height: 10px;
-    }
-    .match-board-card.two-teams .match-board-footer {
       height: 8px;
     }
     .match-board-footer.tone-blue { background: #e3effb; }
@@ -1810,22 +1457,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .match-board-footer.tone-orange { background: #fdf0df; }
     .match-board-footer.tone-yellow { background: #fdf3d2; }
 
+    /* 메펀CK방 전광판: 2팀이든 3팀 이상이든 컴팩트한 동일 크기로 통일 */
     .mefun-board-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      max-width: 820px;
+      gap: 8px;
+      max-width: 500px;
       margin: 0 auto;
     }
-    .mefun-board-grid.two-teams {
-      max-width: 500px;
-      gap: 8px;
-    }
-    @media (max-width: 680px) {
-      .mefun-board-grid,
-      .mefun-board-grid.two-teams {
+    @media (max-width: 540px) {
+      .mefun-board-grid {
         grid-template-columns: 1fr;
-        max-width: 420px;
+        max-width: 320px;
       }
     }
     .mefun-team-card {
@@ -1835,17 +1478,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
       overflow: hidden;
     }
     .mefun-team-header {
-      padding: 6px 8px;
+      padding: 5px 6px;
       border-bottom: 1.5px solid #222222;
       text-align: center;
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 800;
       color: #111111;
       letter-spacing: -0.3px;
-    }
-    .mefun-board-grid.two-teams .mefun-team-header {
-      font-size: 16.5px;
-      padding: 5px 6px;
     }
     .mefun-team-header.tone-blue { background: #b4d1f0; }
     .mefun-team-header.tone-pink { background: #f7cad8; }
@@ -1853,44 +1492,33 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .mefun-team-header.tone-orange { background: #f7cfa0; }
 
     .mefun-members-box {
-      padding: 6px 8px;
+      padding: 5px 6px;
       background: #ffffff;
       border-bottom: 1.5px solid #222222;
     }
-    .mefun-board-grid.two-teams .mefun-members-box {
-      padding: 5px 6px;
-    }
     .mefun-member-line {
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 800;
       color: #111111;
-      line-height: 1.52;
+      line-height: 1.42;
       text-align: center;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-    }
-    .mefun-board-grid.two-teams .mefun-member-line {
-      font-size: 15.5px;
-      line-height: 1.45;
     }
     .mefun-bottom-bar {
       display: grid;
       grid-template-columns: 1fr 1fr;
     }
     .mefun-bottom-cell {
-      padding: 5px 6px;
+      padding: 4px 5px;
       text-align: center;
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 800;
       color: #111111;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-    }
-    .mefun-board-grid.two-teams .mefun-bottom-cell {
-      font-size: 14.5px;
-      padding: 4px 5px;
     }
     .mefun-bottom-cell + .mefun-bottom-cell {
       border-left: 1.5px solid #222222;
@@ -1919,7 +1547,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="card">
       <div class="auth-row">
         <div class="auth-left" id="authControls"></div>
-        <div class="auth-right" id="userAndAdminControls"></div>
+        <div class="info-text">비로그인 상태: 모든 채널 솔로·듀오·스쿼드 점수판 편집 가능 / 로그인 상태: 전체 편집 가능</div>
       </div>
     </div>
 
@@ -1939,64 +1567,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div id="mainContent"></div>
   </div>
 
-  <div class="modal-backdrop" id="nicknameModal">
-    <div class="modal-box" style="max-width:400px;">
-      <div class="modal-header">
-        <h3 class="modal-title">닉네임 설정</h3>
-        <button type="button" id="closeNickModalBtn" onclick="closeNicknameModal()" style="display:none;">닫기</button>
-      </div>
-      <div class="info-text" style="margin-bottom:10px;">
-        중복되지 않는 닉네임을 입력해 주세요. 초기 역할은 일반유저로 등록됩니다.
-      </div>
-      <input type="text" id="nicknameInput" placeholder="닉네임 입력" style="width:100%;" />
-      <div class="error-msg" id="nickErrorMsg"></div>
-      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
-        <button type="button" class="primary" onclick="submitNickname()">확인</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-backdrop" id="permissionModal">
-    <div class="modal-box">
-      <div class="modal-header">
-        <h3 class="modal-title">권한 설정</h3>
-        <button type="button" onclick="closePermissionModal()">닫기</button>
-      </div>
-
-      <div class="admin-toolbar">
-        <div>
-          <label for="adminChannelSelect" style="font-size:13px; font-weight:700;">대상 채널:</label>
-          <select id="adminChannelSelect" onchange="renderAdminUserList()">
-            <option value="kill1">킬내기 1번방</option>
-            <option value="kill2">킬내기 2번방</option>
-            <option value="kill3">킬내기 3번방</option>
-            <option value="mefun_ck">메펀CK방</option>
-          </select>
-        </div>
-        <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(true)">채널 권한 비활성화</button>
-          <button type="button" class="danger-solid" onclick="disableAllRoomBjs(false)">모든 채널 권한 비활성화</button>
-        </div>
-      </div>
-
-      <div class="admin-filter-bar">
-        <input type="text" id="adminSearchInput" placeholder="닉네임 검색..." style="flex:1; min-width:160px;" oninput="renderAdminUserList()" />
-        <select id="adminRoleFilter" onchange="renderAdminUserList()">
-          <option value="all">전체 보기</option>
-          <option value="admin">관리자만</option>
-          <option value="bj">비제이만</option>
-          <option value="user">일반유저만</option>
-        </select>
-        <button type="button" onclick="resetAdminFilters()">초기화</button>
-      </div>
-
-      <div id="adminUserList"></div>
-    </div>
-  </div>
-
   <script>
     const CLIENT_STORAGE_KEY = "pubg_kill_match_client_id";
-    const NICK_STORAGE_KEY = "pubg_kill_match_nickname";
     const TOKEN_STORAGE_KEY = "pubg_kill_match_edit_token";
     const VIEW_STYLE_STORAGE_KEY = "pubg_kill_match_sb_view_style";
     const HEADER_TONES = ["tone-blue", "tone-pink", "tone-purple", "tone-orange"];
@@ -2017,24 +1589,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       } catch (e) {
         return "temp_" + Date.now().toString(36);
       }
-    }
-
-    function getSavedNickname() {
-      try {
-        return (localStorage.getItem(NICK_STORAGE_KEY) || "").trim();
-      } catch (e) {
-        return "";
-      }
-    }
-
-    function setSavedNickname(nick) {
-      try {
-        if (nick) {
-          localStorage.setItem(NICK_STORAGE_KEY, nick);
-        } else {
-          localStorage.removeItem(NICK_STORAGE_KEY);
-        }
-      } catch (e) {}
     }
 
     function getSavedViewStyle() {
@@ -2065,17 +1619,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let isSaving = false;
     let pendingSave = false;
     let eventSource = null;
-    let canEdit = false;
-    let isAdminUser = false;
-    let currentUser = null;
+    let fullEdit = false;
     let localViewStyle = getSavedViewStyle();
     let editToken = (() => {
       try { return localStorage.getItem(TOKEN_STORAGE_KEY) || ""; } catch (e) { return ""; }
     })();
-    let adminCache = { users: [], room_active_map: {} };
     let presenceTimer = null;
     let syncPollTimer = null;
-    let restoreAttempted = false;
+
+    function canEditCurrentView() {
+      if (fullEdit) return true;
+      return currentMode === "scoreboard";
+    }
 
     function authHeaders(extra = {}) {
       const headers = {
@@ -2088,19 +1643,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
       return headers;
     }
 
-    function hasAdminAccess() {
-      return Boolean(isAdminUser || (currentUser && currentUser.role === "admin") || editToken);
-    }
-
     function flushPendingOnUnload() {
-      if (!canEdit || !state || inLobby) return;
+      if (!state || inLobby) return;
+      if (!canEditCurrentView()) return;
       const chParam = `channel=${encodeURIComponent(currentChannel)}`;
       let url = "";
       let bodyObj = null;
 
-      if (currentMode === "tiers") {
+      if (currentMode === "tiers" && fullEdit) {
         url = `/api/tier-board?${chParam}`;
-        bodyObj = { tier_board: getTierBoard(), client_id: clientId };
+        bodyObj = { tier_board: getTierBoard() };
       } else if (currentMode === "scoreboard") {
         const sb = getScoreboardData();
         url = `/api/scoreboard?${chParam}`;
@@ -2110,10 +1662,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           target_score: sb.target_score,
           big_map_points: sb.big_map_points,
           small_map_points: sb.small_map_points,
-          rounds_by_mode: sb.rounds_by_mode,
-          client_id: clientId
+          rounds_by_mode: sb.rounds_by_mode
         };
-      } else if (["solo", "duo", "squad"].includes(currentMode)) {
+      } else if (["solo", "duo", "squad"].includes(currentMode) && fullEdit) {
         url = `/api/modes/${currentMode}?${chParam}`;
         bodyObj = collectCurrentTeamUI();
       }
@@ -2188,17 +1739,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (saveTimer || isSaving || pendingSave) return;
 
       localVersion = msg.version;
-      if (msg.user) {
-        currentUser = msg.user;
-        if (currentUser.nickname) setSavedNickname(currentUser.nickname);
-      } else if (Object.prototype.hasOwnProperty.call(msg, "user")) {
-        currentUser = null;
-      }
-      if (Object.prototype.hasOwnProperty.call(msg, "is_admin")) {
-        isAdminUser = Boolean(msg.is_admin);
-      }
-      if (Object.prototype.hasOwnProperty.call(msg, "can_edit")) {
-        canEdit = Boolean(msg.can_edit);
+      if (Object.prototype.hasOwnProperty.call(msg, "full_edit")) {
+        fullEdit = Boolean(msg.full_edit);
+      } else if (Object.prototype.hasOwnProperty.call(msg, "logged_in")) {
+        fullEdit = Boolean(msg.logged_in);
       }
       if (Array.isArray(msg.channels_meta) && state) {
         state.channels_meta = msg.channels_meta;
@@ -2231,25 +1775,20 @@ HTML_PAGE = r"""<!DOCTYPE html>
       renderMainContent(preserveFocus);
       const statusEl = document.getElementById("saveStatus");
       if (statusEl) statusEl.textContent = "실시간 동기화됨";
-      if (!currentUser && !getSavedNickname()) {
-        openNicknameModal(false);
-      }
     }
 
     function renderAuthBar() {
       const container = document.getElementById("authControls");
-      const rightContainer = document.getElementById("userAndAdminControls");
-
-      if (canEdit) {
+      if (fullEdit) {
         container.innerHTML = `
-          <span class="lock-badge unlocked">수정 권한 활성 (편집 가능)</span>
-          ${editToken ? `<button type="button" onclick="lockEditor()">수정 잠금</button>` : ""}
+          <span class="lock-badge unlocked">로그인됨 (전체 수정 가능)</span>
+          <button type="button" onclick="lockEditor()">로그아웃</button>
         `;
       } else {
         container.innerHTML = `
-          <span class="lock-badge locked">보기 전용 (수정 잠금)</span>
-          <input type="password" id="pinInput" placeholder="관리자 PIN" />
-          <button type="button" class="primary" onclick="unlockEditor()">잠금 해제</button>
+          <span class="lock-badge locked">미로그인 (점수판만 수정 가능)</span>
+          <input type="password" id="pinInput" placeholder="비밀번호(PIN)" />
+          <button type="button" class="primary" onclick="unlockEditor()">로그인</button>
         `;
         const pinEl = document.getElementById("pinInput");
         if (pinEl) {
@@ -2260,92 +1799,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
             }
           });
         }
-      }
-
-      const roleText = !currentUser
-        ? "미등록"
-        : (currentUser.role === "admin" ? "관리자" : (currentUser.role === "bj" ? "비제이" : "일반유저"));
-      const fallbackNick = getSavedNickname();
-      const nickText = currentUser
-        ? `${currentUser.nickname} (${roleText})`
-        : (fallbackNick ? `${fallbackNick} (복구 대기)` : "닉네임 미설정");
-
-      rightContainer.innerHTML = `
-        <span class="user-nick-tag">${escapeHtml(nickText)}</span>
-        <button type="button" onclick="openNicknameModal(Boolean(currentUser || fallbackNick))">닉네임 변경</button>
-        ${hasAdminAccess() ? `<button type="button" class="success" onclick="openPermissionModal()">권한 설정</button>` : ""}
-      `;
-    }
-
-    function openNicknameModal(allowClose) {
-      const modal = document.getElementById("nicknameModal");
-      const closeBtn = document.getElementById("closeNickModalBtn");
-      const input = document.getElementById("nicknameInput");
-      const errEl = document.getElementById("nickErrorMsg");
-      closeBtn.style.display = allowClose ? "inline-block" : "none";
-      errEl.textContent = "";
-      input.value = currentUser ? currentUser.nickname : getSavedNickname();
-      modal.classList.add("open");
-      setTimeout(() => input.focus(), 40);
-    }
-
-    function closeNicknameModal() {
-      if (!currentUser && !getSavedNickname()) return;
-      document.getElementById("nicknameModal").classList.remove("open");
-    }
-
-    async function submitNickname() {
-      const input = document.getElementById("nicknameInput");
-      const errEl = document.getElementById("nickErrorMsg");
-      const rawNick = (input.value || "").trim();
-      if (!rawNick) {
-        errEl.textContent = "닉네임을 입력해 주세요.";
-        return;
-      }
-      try {
-        const res = await fetch("/api/user/register", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ client_id: clientId, nickname: rawNick })
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          errEl.textContent = data.detail || "이미 사용 중인 닉네임입니다.";
-          return;
-        }
-        currentUser = data.user;
-        restoreAttempted = true;
-        setSavedNickname(currentUser.nickname);
-        document.getElementById("nicknameModal").classList.remove("open");
-        await reloadChannelState(currentChannel, false);
-      } catch (e) {
-        errEl.textContent = "닉네임 등록 중 오류가 발생했습니다.";
-      }
-    }
-
-    async function tryRestoreSavedNickname() {
-      const savedNick = getSavedNickname();
-      if (!savedNick) return "none";
-      try {
-        const res = await fetch("/api/user/register", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ client_id: clientId, nickname: savedNick })
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.user && data.user.nickname) {
-            currentUser = data.user;
-            setSavedNickname(currentUser.nickname);
-            return "restored";
-          }
-        }
-        if (res.status === 409) {
-          return "conflict";
-        }
-        return "error";
-      } catch (e) {
-        return "error";
       }
     }
 
@@ -2360,7 +1813,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const res = await fetch("/api/auth/unlock", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pin, client_id: clientId })
+          body: JSON.stringify({ pin })
         });
         if (!res.ok) {
           alert("비밀번호(PIN)가 올바르지 않습니다.");
@@ -2370,8 +1823,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
         editToken = data.edit_token || "";
         try { localStorage.setItem(TOKEN_STORAGE_KEY, editToken); } catch (e) {}
         await reloadChannelState(currentChannel, false);
+        connectRealtimeStream();
       } catch (e) {
-        alert("잠금 해제 요청 중 오류가 발생했습니다.");
+        alert("로그인 요청 중 오류가 발생했습니다.");
       }
     }
 
@@ -2379,174 +1833,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
       editToken = "";
       try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch (e) {}
       await reloadChannelState(currentChannel, false);
-    }
-
-    async function openPermissionModal() {
-      if (!hasAdminAccess()) return;
-      const sel = document.getElementById("adminChannelSelect");
-      if (sel && CHANNEL_LABELS[currentChannel]) {
-        sel.value = currentChannel;
-      }
-      document.getElementById("permissionModal").classList.add("open");
-      await fetchAdminUsers();
-    }
-
-    function closePermissionModal() {
-      document.getElementById("permissionModal").classList.remove("open");
-    }
-
-    function resetAdminFilters() {
-      document.getElementById("adminSearchInput").value = "";
-      document.getElementById("adminRoleFilter").value = "all";
-      renderAdminUserList();
-    }
-
-    async function fetchAdminUsers() {
-      try {
-        const q = `/api/admin/users?client_id=${encodeURIComponent(clientId)}`;
-        const res = await fetch(q, { headers: authHeaders() });
-        if (!res.ok) return;
-        adminCache = await res.json();
-        renderAdminUserList();
-      } catch (e) {}
-    }
-
-    function renderAdminUserList() {
-      const chSel = document.getElementById("adminChannelSelect");
-      const targetCh = chSel ? chSel.value : currentChannel;
-      const kw = (document.getElementById("adminSearchInput")?.value || "").trim().toLowerCase();
-      const flt = document.getElementById("adminRoleFilter")?.value || "all";
-      const activeSet = new Set((adminCache.room_active_map && adminCache.room_active_map[targetCh]) || []);
-      const listEl = document.getElementById("adminUserList");
-      const users = Array.isArray(adminCache.users) ? adminCache.users : [];
-
-      const filtered = users.filter(u => {
-        const matchesName = !kw || String(u.nickname || "").toLowerCase().includes(kw);
-        if (!matchesName) return false;
-        const isBj = u.role === "bj";
-        const isAdm = u.role === "admin";
-
-        if (flt === "admin") return isAdm;
-        if (flt === "bj") return isBj;
-        if (flt === "user") return u.role === "user";
-        return true;
-      });
-
-      if (filtered.length === 0) {
-        listEl.innerHTML = `<div class="info-text" style="text-align:center; padding:16px;">조건에 맞는 유저가 없습니다.</div>`;
-        return;
-      }
-
-      listEl.innerHTML = filtered.map(u => {
-        const isSelf = u.client_id === clientId;
-        const isBj = u.role === "bj";
-        const isAdm = u.role === "admin";
-        const isActiveInCh = isBj && activeSet.has(u.client_id);
-
-        let descText = "일반유저 (보기 전용)";
-        if (isAdm) {
-          descText = "관리자 (로그인 없이 전 채널 수정 및 권한 설정 가능)";
-        } else if (isBj) {
-          const activeNames = Object.entries(CHANNEL_LABELS)
-            .filter(([cid]) => ((adminCache.room_active_map && adminCache.room_active_map[cid]) || []).includes(u.client_id))
-            .map(([, label]) => label);
-          descText = activeNames.length ? `활성 방: ${activeNames.join(", ")}` : "활성 방 없음";
-        }
-
-        let actionHtml = `<span class="info-text" style="min-width:70px; text-align:center;">-</span>`;
-        if (isAdm) {
-          actionHtml = `<span class="lock-badge unlocked">전체 활성</span>`;
-        } else if (isBj) {
-          actionHtml = isActiveInCh
-            ? `<button type="button" class="danger-solid" onclick="toggleBjInChannel('${u.client_id}', false)">비활성화</button>`
-            : `<button type="button" class="success" onclick="toggleBjInChannel('${u.client_id}', true)">활성화</button>`;
-        }
-
-        const safeNickForJs = String(u.nickname || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-
-        return `
-          <div class="admin-user-row">
-            <div>
-              <div style="font-weight:800; font-size:14px;">
-                ${escapeHtml(u.nickname)}
-                ${isSelf ? `<span class="channel-pill" style="margin-left:4px;">나</span>` : ""}
-              </div>
-              <div class="info-text">${escapeHtml(descText)}</div>
-            </div>
-            <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
-              <select onchange="changeUserRole('${u.client_id}', this.value)">
-                <option value="user" ${u.role === "user" ? "selected" : ""}>일반유저</option>
-                <option value="bj" ${u.role === "bj" ? "selected" : ""}>비제이</option>
-                <option value="admin" ${u.role === "admin" ? "selected" : ""}>관리자</option>
-              </select>
-              ${actionHtml}
-              <button type="button" class="danger" ${isSelf ? "disabled title='본인 계정은 삭제할 수 없습니다'" : `onclick="deleteUserAccount('${u.client_id}', '${safeNickForJs}')"`}>삭제</button>
-            </div>
-          </div>
-        `;
-      }).join("");
-    }
-
-    async function changeUserRole(targetClientId, role) {
-      const res = await fetch("/api/admin/role", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ client_id: targetClientId, role, actor_client_id: clientId })
-      });
-      if (res.ok) {
-        await fetchAdminUsers();
-        await reloadChannelState(currentChannel, true);
-      }
-    }
-
-    async function deleteUserAccount(targetClientId, nickname) {
-      if (!confirm(`'${nickname}' 유저를 삭제할까요?\n삭제 시 등록 정보와 방 권한이 모두 제거됩니다.`)) {
-        return;
-      }
-      const res = await fetch("/api/admin/delete-user", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ client_id: targetClientId, actor_client_id: clientId })
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        alert(errData.detail || "유저 삭제 중 오류가 발생했습니다.");
-        return;
-      }
-      await fetchAdminUsers();
-      await reloadChannelState(currentChannel, true);
-    }
-
-    async function toggleBjInChannel(targetClientId, active) {
-      const chSel = document.getElementById("adminChannelSelect");
-      const targetCh = chSel ? chSel.value : currentChannel;
-      const res = await fetch("/api/admin/room-bj", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ channel_id: targetCh, client_id: targetClientId, active, actor_client_id: clientId })
-      });
-      if (res.ok) {
-        await fetchAdminUsers();
-        await reloadChannelState(currentChannel, true);
-      }
-    }
-
-    async function disableAllRoomBjs(onlySelectedChannel) {
-      const chSel = document.getElementById("adminChannelSelect");
-      const targetCh = onlySelectedChannel && chSel ? chSel.value : null;
-      const res = await fetch("/api/admin/disable-all", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ channel_id: targetCh, actor_client_id: clientId })
-      });
-      if (res.ok) {
-        await fetchAdminUsers();
-        await reloadChannelState(currentChannel, true);
-      }
+      connectRealtimeStream();
     }
 
     async function openLobbyView() {
-      if (canEdit && saveTimer) {
+      if (canEditCurrentView() && saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
         await flushAutoSave();
@@ -2595,20 +1886,20 @@ HTML_PAGE = r"""<!DOCTYPE html>
             id,
             label,
             desc: "",
-            can_edit: hasAdminAccess(),
+            full_edit: fullEdit,
             viewer_count: 0
           }));
 
       container.innerHTML = `
         <div class="card">
           <h2 style="margin:0 0 4px 0; font-size:18px;">채널 선택</h2>
-          <div class="info-text">원하는 방을 선택하면 이동합니다.</div>
+          <div class="info-text">원하는 방을 선택하면 이동합니다. (모든 채널 솔로·듀오·스쿼드 점수판 편집 가능)</div>
           <div class="lobby-grid">
             ${chList.map(ch => `
               <div class="lobby-card" onclick="selectChannel('${ch.id}')">
                 <div class="lobby-card-top">
                   <span class="lobby-card-title">${escapeHtml(ch.label)}</span>
-                  <span class="lock-badge ${ch.can_edit ? "unlocked" : "locked"}">${ch.can_edit ? "수정 가능" : "보기 전용"}</span>
+                  <span class="lock-badge ${fullEdit ? "unlocked" : "locked"}">${fullEdit ? "전체 수정" : "점수판 수정"}</span>
                 </div>
                 <div class="lobby-card-desc">${escapeHtml(ch.desc || "")}</div>
                 <div class="info-text">입장 인원: ${ch.viewer_count || 0}명</div>
@@ -2763,11 +2054,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
         });
       });
 
-      return { team_count: teamCount, teams, client_id: clientId };
+      return { team_count: teamCount, teams };
     }
 
     function scheduleAutoSave(delay = 180) {
-      if (!canEdit) return;
+      if (!canEditCurrentView()) return;
       document.getElementById("saveStatus").textContent = "자동 저장 중...";
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
@@ -2777,7 +2068,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function flushAutoSave() {
-      if (!canEdit) return;
+      if (!canEditCurrentView()) return;
       if (isSaving) {
         pendingSave = true;
         return;
@@ -2787,10 +2078,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       try {
         const chParam = `channel=${encodeURIComponent(currentChannel)}`;
         if (currentMode === "tiers") {
-          const payload = {
-            tier_board: getTierBoard(),
-            client_id: clientId
-          };
+          if (!fullEdit) return;
+          const payload = { tier_board: getTierBoard() };
           const res = await fetch(`/api/tier-board?${chParam}`, {
             method: "PUT",
             headers: authHeaders({ "Content-Type": "application/json" }),
@@ -2820,18 +2109,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
             target_score: sb.target_score,
             big_map_points: sb.big_map_points,
             small_map_points: sb.small_map_points,
-            rounds_by_mode: sb.rounds_by_mode,
-            client_id: clientId
+            rounds_by_mode: sb.rounds_by_mode
           };
           const res = await fetch(`/api/scoreboard?${chParam}`, {
             method: "PUT",
             headers: authHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload)
           });
-          if (res.status === 403) {
-            await reloadChannelState(currentChannel, true);
-            return;
-          }
           if (!res.ok) {
             document.getElementById("saveStatus").textContent = "저장 오류 (재시도 대기)";
             return;
@@ -2849,6 +2133,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           }
           document.getElementById("saveStatus").textContent = "실시간 저장 완료";
         } else {
+          if (!fullEdit) return;
           const modeToSave = currentMode;
           const payload = collectCurrentTeamUI();
           state.data.modes[modeToSave] = {
@@ -2924,14 +2209,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     function renderSettingsBar() {
       const leftEl = document.getElementById("modeSettingsLeft");
       const resetBtn = document.getElementById("resetBtn");
-      resetBtn.disabled = !canEdit;
+      resetBtn.disabled = !fullEdit;
       const chLabel = CHANNEL_LABELS[currentChannel] || currentChannel;
 
       if (currentMode === "tiers") {
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[ 공용 · 티어표] 모든 채널에 실시간 동시 반영`;
+          `[ 공용 · 티어표] ${fullEdit ? "수정 가능" : "로그인 필요"}`;
         leftEl.innerHTML = `
           <strong> 공용 · 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
@@ -2947,6 +2232,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const tMeta = getTeamModeMeta(activeMode);
         const mData = getModeData(activeMode);
         const tCount = Math.max(2, Math.min(10, parseInt(mData.team_count || 2, 10)));
+        const sbEditable = canEditCurrentView();
 
         document.getElementById("modeInfo").textContent =
           `[${chLabel} · 점수판 · ${tMeta.label}] 목표 ${targetScore}점 · 큰맵 +${bigPts} / 작은맵 +${smallPts}`;
@@ -2965,7 +2251,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
               min="1"
               max="999999"
               value="${escapeHtml(targetScore)}"
-              ${canEdit ? "" : "disabled"}
+              ${sbEditable ? "" : "disabled"}
             />
           </label>
           <label class="target-inline" for="bigMapPtsInput">
@@ -2978,7 +2264,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
               min="0"
               max="999"
               value="${escapeHtml(bigPts)}"
-              ${canEdit ? "" : "disabled"}
+              ${sbEditable ? "" : "disabled"}
             />
           </label>
           <label class="target-inline" for="smallMapPtsInput">
@@ -2991,7 +2277,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
               min="0"
               max="999"
               value="${escapeHtml(smallPts)}"
-              ${canEdit ? "" : "disabled"}
+              ${sbEditable ? "" : "disabled"}
             />
           </label>
           <span class="info-text">${tCount}팀 · 최대 30라운드</span>
@@ -3022,7 +2308,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         });
 
         const targetInput = document.getElementById("targetScoreInput");
-        if (targetInput && canEdit) {
+        if (targetInput && sbEditable) {
           targetInput.addEventListener("input", () => {
             const currentSb = getScoreboardData();
             const val = parseInt(targetInput.value, 10);
@@ -3046,7 +2332,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
 
         const bigInput = document.getElementById("bigMapPtsInput");
-        if (bigInput && canEdit) {
+        if (bigInput && sbEditable) {
           bigInput.addEventListener("input", () => {
             const currentSb = getScoreboardData();
             const val = parseInt(bigInput.value, 10);
@@ -3066,7 +2352,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
 
         const smallInput = document.getElementById("smallMapPtsInput");
-        if (smallInput && canEdit) {
+        if (smallInput && sbEditable) {
           smallInput.addEventListener("input", () => {
             const currentSb = getScoreboardData();
             const val = parseInt(smallInput.value, 10);
@@ -3090,16 +2376,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const teamCount = Math.max(2, Math.min(10, parseInt(modeData.team_count || 2, 10)));
 
         document.getElementById("modeInfo").textContent =
-          `[${chLabel} · ${meta.label}] 최대 10팀 / 팀당 최대 ${meta.max_members}명`;
+          `[${chLabel} · ${meta.label}] 최대 10팀 / 팀당 최대 ${meta.max_members}명 (${fullEdit ? "수정 가능" : "로그인 필요"})`;
         leftEl.innerHTML = `
           <label for="teamCountInput"><strong>참가 팀 수</strong></label>
-          <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${canEdit ? "" : "disabled"} />
+          <input type="number" id="teamCountInput" min="2" max="10" value="${teamCount}" ${fullEdit ? "" : "disabled"} />
           <span class="info-text">${meta.label} 기준 · 팀당 최대 ${meta.max_members}명</span>
         `;
         resetBtn.textContent = "초기화";
 
         const countInput = document.getElementById("teamCountInput");
-        if (countInput && canEdit) {
+        if (countInput && fullEdit) {
           countInput.addEventListener("change", () => {
             const current = collectCurrentTeamUI();
             state.data.modes[currentMode] = {
@@ -3116,7 +2402,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     async function switchScoreboardTeamMode(nextTeamMode) {
       const sb = getScoreboardData();
       if (sb.active_team_mode === nextTeamMode) return;
-      if (canEdit && saveTimer) {
+      if (canEditCurrentView() && saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
         await flushAutoSave();
@@ -3124,7 +2410,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       getScoreboardData().active_team_mode = nextTeamMode;
       renderSettingsBar();
       renderScoreboard(false);
-      if (canEdit) {
+      if (canEditCurrentView()) {
         scheduleAutoSave(50);
       }
     }
@@ -3318,7 +2604,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       container.innerHTML = "";
 
       const grid = document.createElement("div");
-      grid.className = "mefun-board-grid" + (teamCount <= 2 ? " two-teams" : "");
+      grid.className = "mefun-board-grid";
 
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const tSaved = savedTeams[tIdx] || {};
@@ -3359,7 +2645,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       container.appendChild(grid);
 
-      if (preserveFocus && canEdit) {
+      if (preserveFocus && canEditCurrentView()) {
         restoreFocusSnapshot(focusSnap);
       }
     }
@@ -3420,7 +2706,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const headerText = `[ ${targetScore} ] ${headerParts.join(" : ")}`;
 
       const boardCard = document.createElement("div");
-      boardCard.className = "match-board-card" + (teamSummaries.length <= 2 ? " two-teams" : "");
+      boardCard.className = "match-board-card" + (teamSummaries.length >= 3 ? " many-teams" : "");
 
       const headerDiv = document.createElement("div");
       headerDiv.className = `match-board-header ${toneClass}`;
@@ -3462,7 +2748,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       grid.appendChild(boardCard);
       container.appendChild(grid);
 
-      if (preserveFocus && canEdit) {
+      if (preserveFocus && canEditCurrentView()) {
         restoreFocusSnapshot(focusSnap);
       }
     }
@@ -3479,7 +2765,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const maxRounds = state.max_rounds || 30;
       const maxMembers = tMeta.max_members || 4;
       const modeRoundsObj = sb.rounds_by_mode[activeMode];
-      const disAttr = canEdit ? "" : "disabled";
+      const sbEditable = canEditCurrentView();
+      const disAttr = sbEditable ? "" : "disabled";
 
       const container = document.getElementById("mainContent");
       container.innerHTML = "";
@@ -3636,7 +2923,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         card.appendChild(tableWrap);
         container.appendChild(card);
 
-        if (canEdit) {
+        if (sbEditable) {
           tableWrap.querySelectorAll(".kill-input").forEach(inp => {
             inp.addEventListener("input", () => {
               const latestSb = getScoreboardData();
@@ -3704,7 +2991,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
       }
 
-      if (preserveFocus && canEdit) {
+      if (preserveFocus && canEditCurrentView()) {
         restoreFocusSnapshot(focusSnap);
       }
     }
@@ -3752,7 +3039,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function addPlayerToTier(tier, inputEl) {
-      if (!canEdit) return;
+      if (!fullEdit) return;
       const rawName = (inputEl.value || "").trim();
       if (!rawName) return;
 
@@ -3769,7 +3056,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function removePlayerFromTier(tier, playerName) {
-      if (!canEdit) return;
+      if (!fullEdit) return;
       const board = getTierBoard();
       board[tier] = (board[tier] || []).filter(n => n !== playerName);
       renderSettingsBar();
@@ -3830,10 +3117,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
               item.className = "vertical-member-item";
               item.innerHTML = `
                 <span class="vertical-member-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-                <button type="button" class="chip-del" title="삭제" ${canEdit ? "" : "disabled"}>×</button>
+                <button type="button" class="chip-del" title="삭제" ${fullEdit ? "" : "disabled"}>×</button>
               `;
               const delBtn = item.querySelector(".chip-del");
-              if (canEdit) {
+              if (fullEdit) {
                 delBtn.onclick = () => removePlayerFromTier(tier, name);
               }
               vList.appendChild(item);
@@ -3846,13 +3133,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
           addBox.className = "subtier-add-box";
           const inputVal = (focusSnap && focusSnap.fieldKey === inputKey) ? focusSnap.value : "";
           addBox.innerHTML = `
-            <input type="text" class="subtier-add-input" data-field-key="${inputKey}" placeholder="이름" value="${escapeHtml(inputVal)}" ${canEdit ? "" : "disabled"} />
-            <button type="button" class="subtier-add-btn" ${canEdit ? "" : "disabled"}>+</button>
+            <input type="text" class="subtier-add-input" data-field-key="${inputKey}" placeholder="이름" value="${escapeHtml(inputVal)}" ${fullEdit ? "" : "disabled"} />
+            <button type="button" class="subtier-add-btn" ${fullEdit ? "" : "disabled"}>+</button>
           `;
 
           const addInput = addBox.querySelector(".subtier-add-input");
           const addBtn = addBox.querySelector(".subtier-add-btn");
-          if (canEdit) {
+          if (fullEdit) {
             addBtn.onclick = () => addPlayerToTier(tier, addInput);
             addInput.addEventListener("keydown", (e) => {
               if (e.key === "Enter") {
@@ -3872,7 +3159,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       container.appendChild(wrap);
 
-      if (preserveFocus && canEdit) {
+      if (preserveFocus && fullEdit) {
         restoreFocusSnapshot(focusSnap);
       }
     }
@@ -3886,7 +3173,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const listEl = document.getElementById("mainContent");
       listEl.innerHTML = "";
       const savedTeams = modeData.teams || [];
-      const disAttr = canEdit ? "" : "disabled";
+      const disAttr = fullEdit ? "" : "disabled";
 
       for (let tIdx = 0; tIdx < teamCount; tIdx++) {
         const saved = savedTeams[tIdx] || {};
@@ -3911,7 +3198,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <input type="text" class="team-name-input" data-field-key="${teamNameKey}" value="${escapeHtml(teamName)}" style="width:160px;" ${disAttr} />
         `;
         const teamNameInput = left.querySelector(".team-name-input");
-        if (canEdit) {
+        if (fullEdit) {
           teamNameInput.addEventListener("input", () => scheduleAutoSave());
         }
 
@@ -3924,8 +3211,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
         const doneBtn = document.createElement("button");
         doneBtn.textContent = "완료";
-        doneBtn.disabled = !canEdit;
-        if (canEdit) {
+        doneBtn.disabled = !fullEdit;
+        if (fullEdit) {
           doneBtn.onclick = () => completeTeam(card);
         }
 
@@ -3974,7 +3261,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <select class="member-handicap" ${disAttr}>${handicapOptions}</select>
           `;
 
-          if (canEdit) {
+          if (fullEdit) {
             const nameInput = row.querySelector(".member-name");
             const tierSelect = row.querySelector(".member-tier");
 
@@ -4004,7 +3291,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         listEl.appendChild(card);
       }
 
-      if (preserveFocus && canEdit) {
+      if (preserveFocus && fullEdit) {
         restoreFocusSnapshot(focusSnap);
       }
     }
@@ -4032,7 +3319,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function completeTeam(card) {
-      if (!canEdit) return;
+      if (!fullEdit) return;
       let penaltySum = 0;
       let handicapSum = 0;
       card.querySelectorAll(".member-row").forEach(row => {
@@ -4050,11 +3337,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     async function switchMode(nextMode) {
       if (nextMode === currentMode) return;
-      if (canEdit && saveTimer) {
+      if (canEditCurrentView() && saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
         await flushAutoSave();
-      } else if (canEdit && ["solo", "duo", "squad"].includes(currentMode)) {
+      } else if (fullEdit && ["solo", "duo", "squad"].includes(currentMode)) {
         const current = collectCurrentTeamUI();
         state.data.modes[currentMode] = {
           team_count: current.team_count,
@@ -4068,13 +3355,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function resetCurrentView() {
-      if (!canEdit) return;
+      if (!fullEdit) return;
       if (saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
       }
 
-      const chParam = `channel=${encodeURIComponent(currentChannel)}&client_id=${encodeURIComponent(clientId)}`;
+      const chParam = `channel=${encodeURIComponent(currentChannel)}`;
 
       if (currentMode === "tiers") {
         if (!confirm("전체 방 공용 티어표를 기본 명단으로 되돌릴까요?")) return;
@@ -4165,12 +3452,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
       state = nextState;
       localVersion = Math.max(localVersion, nextState.version || 1);
-      currentUser = nextState.user || null;
-      if (currentUser && currentUser.nickname) {
-        setSavedNickname(currentUser.nickname);
-      }
-      isAdminUser = Boolean(nextState.is_admin);
-      canEdit = Boolean(nextState.can_edit);
+      fullEdit = Boolean(nextState.full_edit ?? nextState.logged_in);
 
       renderAuthBar();
       renderTabs();
@@ -4179,9 +3461,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         renderSettingsBar();
       }
       renderMainContent(preserveFocus);
-      if (!currentUser && !getSavedNickname()) {
-        openNicknameModal(false);
-      }
     }
 
     function connectRealtimeStream() {
@@ -4212,20 +3491,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         state.data.scoreboard.view_style = localViewStyle;
       }
       localVersion = state.version || 1;
-      currentUser = state.user || null;
-      isAdminUser = Boolean(state.is_admin);
-      canEdit = Boolean(state.can_edit);
-
-      let restoreStatus = "none";
-      if (!currentUser && getSavedNickname() && !restoreAttempted) {
-        restoreAttempted = true;
-        restoreStatus = await tryRestoreSavedNickname();
-        if (restoreStatus === "restored") {
-          await reloadChannelState(currentChannel, false);
-        }
-      } else if (currentUser && currentUser.nickname) {
-        setSavedNickname(currentUser.nickname);
-      }
+      fullEdit = Boolean(state.full_edit ?? state.logged_in);
 
       renderAuthBar();
       renderTabs();
@@ -4234,10 +3500,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       connectRealtimeStream();
       startPresenceLoop();
       startSyncBackupLoop();
-
-      if (!currentUser && restoreStatus !== "error") {
-        openNicknameModal(false);
-      }
     }
 
     window.addEventListener("beforeunload", () => {
