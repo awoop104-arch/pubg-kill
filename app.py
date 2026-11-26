@@ -3,13 +3,26 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 import threading
 import time
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-DATA_FILE = os.environ.get("DATA_FILE", "pubg_kill_match_data.json")
+
+def resolve_default_data_file() -> str:
+    env_path = (os.environ.get("DATA_FILE") or "").strip()
+    if env_path:
+        return os.path.abspath(env_path)
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, "pubg_kill_match_data.json")
+
+
+DATA_FILE = resolve_default_data_file()
 EDIT_PIN = os.environ.get("EDIT_PIN", "tnals1004")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", f"pubg-kill-match-{EDIT_PIN}")
 
@@ -276,7 +289,7 @@ def default_tier_board():
     return board
 
 
-def normalize_tier_board(raw_board):
+def normalize_tier_board(raw_board, is_initialized: bool = False):
     board = {tier: [] for tier in TIERS}
     if not isinstance(raw_board, dict):
         return default_tier_board()
@@ -292,7 +305,9 @@ def normalize_tier_board(raw_board):
                 if clean and clean not in board[tier]:
                     board[tier].append(clean)
 
-    return board if has_any else default_tier_board()
+    if has_any or is_initialized:
+        return board
+    return default_tier_board()
 
 
 def default_mode_data():
@@ -388,6 +403,7 @@ def default_channel_payload(raw_source: dict | None = None):
 def default_db():
     return {
         "users": {},
+        "tier_board_initialized": False,
         "tier_board": default_tier_board(),
         "channels": {
             cid: default_channel_payload()
@@ -422,22 +438,26 @@ def load_db():
                     "role": role,
                 }
 
-    # 전체 방 공용 tier_board 우선 로드 (없으면 기존 채널별 tier_board에서 마이그레이션)
+    tb_init = bool(raw.get("tier_board_initialized", False))
     if isinstance(raw.get("tier_board"), dict):
-        base["tier_board"] = normalize_tier_board(raw.get("tier_board"))
+        base["tier_board"] = normalize_tier_board(raw.get("tier_board"), is_initialized=tb_init)
+        base["tier_board_initialized"] = tb_init or any(len(v) > 0 for v in base["tier_board"].values())
     else:
         migrated_board = None
         if isinstance(raw.get("channels"), dict):
             for cid, _, _ in CHANNELS:
                 ch_raw = raw["channels"].get(cid)
                 if isinstance(ch_raw, dict) and isinstance(ch_raw.get("tier_board"), dict):
-                    candidate = normalize_tier_board(ch_raw.get("tier_board"))
+                    candidate = normalize_tier_board(ch_raw.get("tier_board"), is_initialized=True)
                     if any(len(v) > 0 for v in candidate.values()):
                         migrated_board = candidate
                         break
-        if migrated_board is None and isinstance(raw.get("tier_board"), dict):
-            migrated_board = normalize_tier_board(raw.get("tier_board"))
-        base["tier_board"] = migrated_board if migrated_board is not None else default_tier_board()
+        if migrated_board is not None:
+            base["tier_board"] = migrated_board
+            base["tier_board_initialized"] = True
+        else:
+            base["tier_board"] = default_tier_board()
+            base["tier_board_initialized"] = False
 
     if "channels" not in raw and ("modes" in raw or "teams" in raw or "team_count" in raw):
         legacy = {}
@@ -843,7 +863,8 @@ def update_tier_board(payload: TierBoardPayload, request: Request, channel: str 
     with FILE_LOCK:
         db_obj = load_db()
         require_channel_editor(request, db_obj, ch_id, payload.client_id)
-        db_obj["tier_board"] = normalize_tier_board(payload.tier_board)
+        db_obj["tier_board_initialized"] = True
+        db_obj["tier_board"] = normalize_tier_board(payload.tier_board, is_initialized=True)
         save_db(db_obj)
         version = STATE_VERSION
         ch_data = db_obj["channels"][ch_id]
@@ -866,6 +887,7 @@ def reset_tier_board(request: Request, channel: str = "kill1", client_id: str = 
     with FILE_LOCK:
         db_obj = load_db()
         require_channel_editor(request, db_obj, ch_id, client_id)
+        db_obj["tier_board_initialized"] = True
         db_obj["tier_board"] = default_tier_board()
         save_db(db_obj)
         version = STATE_VERSION
@@ -1244,7 +1266,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       color: #fff;
     }
 
-    /* 채널 로비 */
     .lobby-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -1280,7 +1301,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       margin-bottom: 12px;
     }
 
-    /* 모달 */
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -1683,7 +1703,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       min-width: 66px;
     }
 
-    /* 기본 전광판 (kill1~3) */
     .board-grid {
       display: flex;
       justify-content: center;
@@ -1770,7 +1789,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .match-board-footer.tone-orange { background: #fdf0df; }
     .match-board-footer.tone-yellow { background: #fdf3d2; }
 
-    /* 메펀CK방(mefun_ck) 전용 각 팀별 카드 전광판 */
     .mefun-board-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1879,7 +1897,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div id="mainContent"></div>
   </div>
 
-  <!-- 닉네임 설정/변경 모달 -->
   <div class="modal-backdrop" id="nicknameModal">
     <div class="modal-box" style="max-width:400px;">
       <div class="modal-header">
@@ -1897,7 +1914,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- 관리자 권한 설정 모달 -->
   <div class="modal-backdrop" id="permissionModal">
     <div class="modal-box">
       <div class="modal-header">
@@ -1998,6 +2014,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let adminCache = { users: [], room_active_map: {} };
     let presenceTimer = null;
     let syncPollTimer = null;
+    let restoreAttempted = false;
 
     function authHeaders(extra = {}) {
       const headers = {
@@ -2012,6 +2029,44 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     function hasAdminAccess() {
       return Boolean(isAdminUser || (currentUser && currentUser.role === "admin") || editToken);
+    }
+
+    function flushPendingOnUnload() {
+      if (!canEdit || !state || inLobby) return;
+      const chParam = `channel=${encodeURIComponent(currentChannel)}`;
+      let url = "";
+      let bodyObj = null;
+
+      if (currentMode === "tiers") {
+        url = `/api/tier-board?${chParam}`;
+        bodyObj = { tier_board: getTierBoard(), client_id: clientId };
+      } else if (currentMode === "scoreboard") {
+        const sb = getScoreboardData();
+        url = `/api/scoreboard?${chParam}`;
+        bodyObj = {
+          active_team_mode: sb.active_team_mode,
+          view_style: sb.view_style,
+          target_score: sb.target_score,
+          big_map_points: sb.big_map_points,
+          small_map_points: sb.small_map_points,
+          rounds_by_mode: sb.rounds_by_mode,
+          client_id: clientId
+        };
+      } else if (["solo", "duo", "squad"].includes(currentMode)) {
+        url = `/api/modes/${currentMode}?${chParam}`;
+        bodyObj = collectCurrentTeamUI();
+      }
+
+      if (url && bodyObj) {
+        try {
+          fetch(url, {
+            method: "PUT",
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify(bodyObj),
+            keepalive: true
+          }).catch(() => {});
+        } catch (e) {}
+      }
     }
 
     function sendPresenceHeartbeat(active = true) {
@@ -2077,7 +2132,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         if (currentUser.nickname) setSavedNickname(currentUser.nickname);
       } else if (Object.prototype.hasOwnProperty.call(msg, "user")) {
         currentUser = null;
-        setSavedNickname("");
       }
       if (Object.prototype.hasOwnProperty.call(msg, "is_admin")) {
         isAdminUser = Boolean(msg.is_admin);
@@ -2109,7 +2163,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       renderMainContent(preserveFocus);
       const statusEl = document.getElementById("saveStatus");
       if (statusEl) statusEl.textContent = "실시간 동기화됨";
-      if (!currentUser) {
+      if (!currentUser && !getSavedNickname()) {
         openNicknameModal(false);
       }
     }
@@ -2143,11 +2197,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const roleText = !currentUser
         ? "미등록"
         : (currentUser.role === "admin" ? "관리자" : (currentUser.role === "bj" ? "비제이" : "일반유저"));
-      const nickText = currentUser ? `${currentUser.nickname} (${roleText})` : "닉네임 미설정";
+      const fallbackNick = getSavedNickname();
+      const nickText = currentUser
+        ? `${currentUser.nickname} (${roleText})`
+        : (fallbackNick ? `${fallbackNick} (복구 대기)` : "닉네임 미설정");
 
       rightContainer.innerHTML = `
         <span class="user-nick-tag">${escapeHtml(nickText)}</span>
-        <button type="button" onclick="openNicknameModal(Boolean(currentUser))">닉네임 변경</button>
+        <button type="button" onclick="openNicknameModal(Boolean(currentUser || fallbackNick))">닉네임 변경</button>
         ${hasAdminAccess() ? `<button type="button" class="success" onclick="openPermissionModal()">권한 설정</button>` : ""}
       `;
     }
@@ -2165,7 +2222,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     function closeNicknameModal() {
-      if (!currentUser) return;
+      if (!currentUser && !getSavedNickname()) return;
       document.getElementById("nicknameModal").classList.remove("open");
     }
 
@@ -2189,6 +2246,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           return;
         }
         currentUser = data.user;
+        restoreAttempted = true;
         setSavedNickname(currentUser.nickname);
         document.getElementById("nicknameModal").classList.remove("open");
         await reloadChannelState(currentChannel, false);
@@ -2199,22 +2257,28 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     async function tryRestoreSavedNickname() {
       const savedNick = getSavedNickname();
-      if (!savedNick) return false;
+      if (!savedNick) return "none";
       try {
         const res = await fetch("/api/user/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ client_id: clientId, nickname: savedNick })
         });
-        if (!res.ok) return false;
-        const data = await res.json();
-        if (data && data.user && data.user.nickname) {
-          currentUser = data.user;
-          setSavedNickname(currentUser.nickname);
-          return true;
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.user && data.user.nickname) {
+            currentUser = data.user;
+            setSavedNickname(currentUser.nickname);
+            return "restored";
+          }
         }
-      } catch (e) {}
-      return false;
+        if (res.status === 409) {
+          return "conflict";
+        }
+        return "error";
+      } catch (e) {
+        return "error";
+      }
     }
 
     async function unlockEditor() {
@@ -2414,6 +2478,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     async function openLobbyView() {
+      if (canEdit && saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        await flushAutoSave();
+      }
       inLobby = true;
       syncShellVisibility();
       sendPresenceHeartbeat(false);
@@ -2790,7 +2859,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const board = getTierBoard();
         const totalCount = state.tiers.reduce((acc, t) => acc + (board[t] ? board[t].length : 0), 0);
         document.getElementById("modeInfo").textContent =
-          `[공용 · 티어표] 모든 방에 실시간 동시 반영`;
+          `[공용 · 티어표] 모든 채널에 실시간 동시 반영`;
         leftEl.innerHTML = `
           <strong>전체 방 공용 · 등록 인원</strong>
           <span class="info-text">${totalCount}명</span>
@@ -3044,17 +3113,35 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const smallVal = Number.isNaN(smallPts) ? 5 : smallPts;
 
       const members = teamObj.members || [];
+      let totalHandicap = 0;
+      const memberHandicaps = [];
+
+      for (let s = 0; s < maxMembers; s++) {
+        const m = members[s] || {};
+        const hVal = parseFloat(m.handicap);
+        const hNum = Number.isNaN(hVal) ? 0 : hVal;
+        memberHandicaps.push(hNum);
+        totalHandicap += hNum;
+      }
+
       let totalKills = 0;
       let totalDeductions = 0;
       let totalChickenPoints = 0;
       let totalChickens = 0;
       let bigMapCount = 0;
       let smallMapCount = 0;
-      let totalNet = 0;
+      let roundsNetSum = 0;
 
       const memberStats = [];
       for (let s = 0; s < maxMembers; s++) {
-        memberStats.push({ kills: 0, deaths: 0, deductionTotal: 0, net: 0 });
+        // 각 멤버가 자신의 킬핸디 점수를 기본 점수로 시작(1회 반영)
+        memberStats.push({
+          kills: 0,
+          deaths: 0,
+          deductionTotal: 0,
+          handicap: memberHandicaps[s],
+          net: memberHandicaps[s]
+        });
       }
       const roundTotals = [];
 
@@ -3094,7 +3181,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         totalDeductions += rDed;
         totalChickenPoints += rChickenPts;
         totalChickens += rChickenCnt;
-        totalNet += rNet;
+        roundsNetSum += rNet;
 
         roundTotals.push({
           round: r,
@@ -3105,12 +3192,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
         });
       }
 
+      const totalNet = roundsNetSum + totalHandicap;
       const sumAllDeaths = memberStats.reduce((acc, ms) => acc + ms.deaths, 0);
 
       return {
         totalKills,
         totalDeaths: sumAllDeaths,
         totalDeductions,
+        totalHandicap,
         totalChickenPoints,
         totalChickens,
         bigMapCount,
@@ -3178,8 +3267,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
         for (let s = 0; s < maxMembers; s++) {
           const m = members[s] || {};
           const mName = (m.name || "").trim();
-          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, net: 0 };
-          const hasAnyActivity = mName || ms.kills !== 0 || ms.deductionTotal !== 0 || ms.net !== 0;
+          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, handicap: 0, net: 0 };
+          const hasAnyActivity = mName || ms.kills !== 0 || ms.deductionTotal !== 0 || ms.handicap !== 0 || ms.net !== 0;
           if (!hasAnyActivity && s > 0 && activeMode !== "solo") continue;
 
           const displayName = mName || `${s + 1}번`;
@@ -3237,7 +3326,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         for (let s = 0; s < maxMembers; s++) {
           const m = members[s] || {};
           const mName = (m.name || "").trim() || `${s + 1}번`;
-          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, net: 0 };
+          const ms = totals.memberStats[s] || { kills: 0, deaths: 0, deductionTotal: 0, handicap: 0, net: 0 };
           colPlayers.push({
             label: `${mName} ${formatNumberDisplay(ms.net)} (${formatNumberDisplay(ms.kills)}-${formatNumberDisplay(ms.deductionTotal)})`,
           });
@@ -3363,6 +3452,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <span class="sb-team-title">TEAM ${tIdx + 1} · ${escapeHtml(teamName)}</span>
           <div class="sb-team-totals" id="sbTeamTotals-${tIdx}">
             <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
+            <span>킬핸디: +${formatNumberDisplay(totals.totalHandicap)}</span>
             <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
             <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
             <span>🍗 치킨점수: +${formatNumberDisplay(totals.totalChickenPoints)} (큰${totals.bigMapCount}/작${totals.smallMapCount})</span>
@@ -3378,8 +3468,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const m = members[s] || {};
           const mLabel = (m.name || "").trim() || `${s + 1}번`;
           const dedAmt = penaltyDeductionAmount(m.penalty);
+          const hAmt = parseFloat(m.handicap) || 0;
           headerHtml += `
-            <th>${escapeHtml(mLabel)} 킬</th>
+            <th>${escapeHtml(mLabel)} 킬<br><span style="font-size:10px; font-weight:500; color:#99f6e4;">(핸디 +${formatNumberDisplay(hAmt)})</span></th>
             <th>${escapeHtml(mLabel)} 데스<br><span style="font-size:10px; font-weight:500; color:#fca5a5;">(-${dedAmt})</span></th>
           `;
         }
@@ -3579,6 +3670,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (topTotalsEl) {
         topTotalsEl.innerHTML = `
           <span>총점: ${formatNumberDisplay(totals.totalNet)}</span>
+          <span>킬핸디: +${formatNumberDisplay(totals.totalHandicap)}</span>
           <span>킬 합계: ${formatNumberDisplay(totals.totalKills)}</span>
           <span>감점 차감: -${formatNumberDisplay(totals.totalDeductions)}</span>
           <span>🍗 치킨점수: +${formatNumberDisplay(totals.totalChickenPoints)} (큰${totals.bigMapCount}/작${totals.smallMapCount})</span>
@@ -4002,8 +4094,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       currentUser = nextState.user || null;
       if (currentUser && currentUser.nickname) {
         setSavedNickname(currentUser.nickname);
-      } else {
-        setSavedNickname("");
       }
       isAdminUser = Boolean(nextState.is_admin);
       canEdit = Boolean(nextState.can_edit);
@@ -4015,7 +4105,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         renderSettingsBar();
       }
       renderMainContent(preserveFocus);
-      if (!currentUser) {
+      if (!currentUser && !getSavedNickname()) {
         openNicknameModal(false);
       }
     }
@@ -4049,12 +4139,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
       isAdminUser = Boolean(state.is_admin);
       canEdit = Boolean(state.can_edit);
 
-      if (!currentUser && getSavedNickname()) {
-        const restored = await tryRestoreSavedNickname();
-        if (restored) {
+      let restoreStatus = "none";
+      if (!currentUser && getSavedNickname() && !restoreAttempted) {
+        restoreAttempted = true;
+        restoreStatus = await tryRestoreSavedNickname();
+        if (restoreStatus === "restored") {
           await reloadChannelState(currentChannel, false);
-        } else {
-          setSavedNickname("");
         }
       } else if (currentUser && currentUser.nickname) {
         setSavedNickname(currentUser.nickname);
@@ -4068,12 +4158,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
       startPresenceLoop();
       startSyncBackupLoop();
 
-      if (!currentUser) {
+      if (!currentUser && restoreStatus !== "error") {
         openNicknameModal(false);
       }
     }
 
     window.addEventListener("beforeunload", () => {
+      flushPendingOnUnload();
       sendPresenceHeartbeat(false);
     });
 
